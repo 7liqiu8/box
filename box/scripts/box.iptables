@@ -2541,12 +2541,25 @@ apply_tun_family() {
     log Info "TUN 模式下忽略性能模式"
   fi
 
-  if forward -I && start_tun_bypass; then
+  if ! forward -I; then
+    log Error "$(tun_bypass_family_label) TUN 规则创建失败。"
+    forward -D > /dev/null 2>&1
+    return 1
+  fi
+
+  if [ "${bypass_cn_ip}" != "true" ]; then
+    stop_tun_bypass > /dev/null 2>&1
+    log Info "$(tun_bypass_family_label) TUN 规则创建完成。"
+    return 0
+  fi
+
+  if start_tun_bypass; then
     log Info "$(tun_bypass_family_label) TUN 规则创建完成。"
   else
     log Error "$(tun_bypass_family_label) TUN 规则创建失败。"
     stop_tun_bypass > /dev/null 2>&1
     forward -D > /dev/null 2>&1
+    return 1
   fi
 }
 
