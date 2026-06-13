@@ -50,18 +50,24 @@ ensure_dirs() {
 }
 
 net_log_info() {
-  ensure_dirs
-  echo "[$(date '+%F %T')] [Info]: $*" >> "${NET_LOG_FILE}" 2>&1
+  local previous_box_log="${box_log}"
+  box_log="${NET_LOG_FILE}"
+  log Info "$*" >/dev/null
+  box_log="${previous_box_log}"
 }
 
 net_log_warn() {
-  ensure_dirs
-  echo "[$(date '+%F %T')] [Warn]: $*" >> "${NET_LOG_FILE}" 2>&1
+  local previous_box_log="${box_log}"
+  box_log="${NET_LOG_FILE}"
+  log Warn "$*" >/dev/null
+  box_log="${previous_box_log}"
 }
 
 net_log_debug() {
-  ensure_dirs
-  echo "[$(date '+%F %T')] [Debug]: $*" >> "${NET_LOG_FILE}" 2>&1
+  local previous_box_log="${box_log}"
+  box_log="${NET_LOG_FILE}"
+  log Debug "$*" >/dev/null
+  box_log="${previous_box_log}"
 }
 
 reset_event_logs() {
@@ -71,8 +77,10 @@ reset_event_logs() {
 
 control_log_msg() {
   [ "${inotify_log_enabled}" = "true" ] || return 0
-  ensure_dirs
-  echo "$(date '+%Y-%m-%d %H:%M:%S') - $*" >> "${CTRL_LOG_FILE}"
+  local previous_box_log="${box_log}"
+  box_log="${CTRL_LOG_FILE}"
+  log Info "$*" >/dev/null
+  box_log="${previous_box_log}"
 }
 
 ensure_chain_and_flush() {

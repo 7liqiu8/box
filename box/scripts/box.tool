@@ -35,8 +35,7 @@ mask_url() {
 
 # 启动提示
 divider() {
-  local line="----------------------------------------"
-  [ -n "$box_log" ] && echo "$line" >> "$box_log"
+  [ -n "$box_log" ] && log Info "----------------------------------------" >/dev/null
 }
 trap divider EXIT
 log Info "执行命令: $0 $@"

@@ -1231,22 +1231,16 @@ start_box() {
   get_dns_mode
   set_description running
 
-  echo -n "" > "${box_log}"
+  : > "${box_log}"
   box_version=$(busybox awk '!/^ *#/ && /version=/ { print $0 }' "/data/adb/modules/box_for_root/module.prop" 2>/dev/null)
-
-  if [ -t 1 ]; then
-    echo -e "${yellow}$(getprop persist.sys.timezone) $(date)${normal}"
-    echo -e "${yellow}$(getprop gsm.sim.operator.alpha) $(getprop gsm.network.type)${normal}"
-    echo -e "${yellow}${box_version}($(getprop ro.product.cpu.abi))${normal}"
-    echo -e "${white}━━━━━━━━━━━━━━━━━━${normal}"
-  else
-    {
-      echo "$(getprop persist.sys.timezone) $(date)"
-      echo "$(getprop gsm.sim.operator.alpha) $(getprop gsm.network.type)"
-      echo "${box_version}($(getprop ro.product.cpu.abi))"
-      echo "━━━━━━━━━━━━━━━━━━"
-    } | tee -a "${box_log}" >/dev/null 2>&1
-  fi
+  startup_timezone="$(getprop persist.sys.timezone)"
+  startup_datetime="$(date)"
+  startup_network="$(getprop gsm.sim.operator.alpha) $(getprop gsm.network.type)"
+  startup_abi="$(getprop ro.product.cpu.abi)"
+  log Info "Timezone: ${startup_timezone} | Time: ${startup_datetime}"
+  log Info "Network: ${startup_network}"
+  log Info "Module: ${box_version} (${startup_abi})"
+  log Info "━━━━━━━━━━━━━━━━━━"
 
   # 如果 bin_name 仍在运行则更新 iptables
   PIDS=("${bin_list[@]}")
