@@ -21,8 +21,9 @@ wait_for_data_ready() {
 
 refresh_box() {
   if [ -f "/data/adb/box/run/box.pid" ]; then
-    "${scripts_dir}/box.service" stop > "/dev/null" 2>&1
-    "${scripts_dir}/box.iptables" disable > "/dev/null" 2>&1
+    "${scripts_dir}/box.service" stop > "/dev/null" 2>&1 &
+    "${scripts_dir}/box.iptables" disable > "/dev/null" 2>&1 &
+    wait
   fi
 }
 

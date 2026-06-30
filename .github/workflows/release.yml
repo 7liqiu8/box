@@ -10,6 +10,11 @@ on:
         description: '发布更新日志（留空则自动从 commits 生成，手动填写可用 | 分隔）'
         required: false
         type: string
+      send_telegram:
+        description: '发送到 Telegram'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -159,7 +164,7 @@ jobs:
       contents: read
     needs:
       - build
-    if: success()
+    if: ${{ success() && github.event.inputs.send_telegram == 'true' }}
     steps:
       - uses: actions/checkout@v4.1.0
         with:

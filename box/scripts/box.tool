@@ -71,13 +71,21 @@ upfile() {
   log Debug "使用 User-Agent: ${current_ua}"
 
   if which curl >/dev/null; then
-    http_code=$(curl -L -s --insecure --http1.1 --compressed --user-agent "${current_ua}" -o "${file}" -w "%{http_code}" "${update_url}")
+    local time_cond=""
+    [ -f "${file_bak}" ] && time_cond="-z ${file_bak}"
+    http_code=$(curl -L -s --insecure --http1.1 --compressed ${time_cond} --user-agent "${current_ua}" -o "${file}" -w "%{http_code}" "${update_url}")
     curl_exit_code=$?
 
     if [ ${curl_exit_code} -ne 0 ]; then
       log Error "使用 curl 下载失败 (退出码: ${curl_exit_code})"
       [ -f "${file_bak}" ] && mv "${file_bak}" "${file}"
       return 1
+    fi
+
+    if [ "${http_code}" = "304" ]; then
+      log Info "下载跳过: 远端未更新 (HTTP 304)，复用本地文件"
+      [ -f "${file_bak}" ] && mv "${file_bak}" "${file}"
+      return 0
     fi
 
     if [ "${http_code}" -ne 200 ]; then

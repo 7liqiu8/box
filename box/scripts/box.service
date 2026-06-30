@@ -146,9 +146,7 @@ box_bin_alive() {
   if ! kill -0 "$PID" >/dev/null 2>&1; then
     log Error "${bin_name} 服务未运行。$(<"${box_run}/${bin_name}.log")"
     log Error "清理无效 pid $PID"
-    for bin in "${bin_list[@]}"; do
-      killall -15 "${bin}" >/dev/null || busybox pkill -15 "${bin}" >/dev/null 2>&1 
-    done
+    busybox pkill -15 "${bin_name}" >/dev/null 2>&1 || true
     "${scripts_dir}/box.iptables" disable >/dev/null 2>&1
     [ -f "${box_pid}" ] && rm -f "${box_pid}"
     exit 1
@@ -1299,11 +1297,8 @@ start_box() {
   box_run_bin
   box_cgroup
 
-  count=0
-  while [ $count -le 5 ]; do
-    box_bin_alive || break
-    count=$((count + 1))
-  done
+  busybox sleep 0.3
+  box_bin_alive
 
   true
 }
@@ -1321,11 +1316,9 @@ stop_box() {
   done
 
   count=0
-  while [ $count -lt 3 ]; do
-    if ! busybox pidof "${bin_name}" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
+  while [ "${count}" -lt 15 ]; do
+    busybox pidof "${bin_name}" >/dev/null 2>&1 || break
+    busybox sleep 0.1
     count=$((count + 1))
   done
 
@@ -1389,10 +1382,22 @@ case "$1" in
     stop_box
     ;;
   restart)
-    "${scripts_dir}/box.iptables" disable && stop_box
-    if start_box; then
-      "${scripts_dir}/box.iptables" renew
+    "${scripts_dir}/box.iptables" disable >/dev/null 2>&1 &
+    _r_ipt=$!
+    stop_box
+    wait "${_r_ipt}" 2>/dev/null
+
+    start_box &
+    _r_sb=$!
+    "${scripts_dir}/box.iptables" renew >/dev/null 2>&1 &
+    _r_ipt=$!
+    wait "${_r_sb}"; _r_rc=$?
+    wait "${_r_ipt}" 2>/dev/null
+    if [ "${_r_rc}" -eq 0 ]; then
       $scripts_dir/box.tool webroot >/dev/null 2>&1
+    else
+      log Error "核心启动失败，回滚 iptables 规则。"
+      "${scripts_dir}/box.iptables" disable >/dev/null 2>&1
     fi
     ;;
   status)

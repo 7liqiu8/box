@@ -7,6 +7,11 @@ on:
         description: '预发布版本号'
         required: true
         type: string
+      send_telegram:
+        description: '发送到 Telegram'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -176,7 +181,7 @@ jobs:
     needs:
       - build
       - prerelease
-    if: success()
+    if: ${{ success() && github.event.inputs.send_telegram == 'true' }}
     steps:
       - uses: actions/checkout@v4.1.0
         with:

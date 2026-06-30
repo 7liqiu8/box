@@ -277,15 +277,7 @@ stop_service_if_needed() {
 }
 
 save_wifi_state() {
-  local ssid="$1"
-  local bssid="$2"
-  local ip="$3"
-
-  cat > "${CTRL_WIFI_STATE_FILE}" <<-EOF
-ssid:${ssid}
-bssid:${bssid}
-ip:${ip}
-EOF
+  printf '%s\n' "$1" > "${CTRL_WIFI_STATE_FILE}"
 }
 
 apply_network_control_policy() {
@@ -299,23 +291,27 @@ apply_network_control_policy() {
   . "${SCRIPTS_DIR}/ctr.utils"
   check_stability_window || return 0
 
+  local iface
+  local wifi_status_text
   local wifi_status
   local ssid
   local bssid
   local wifi_ip=""
   local i
 
-  wifi_status=$(is_wifi_connected)
-  ssid=$(get_current_ssid)
-  bssid=$(get_current_bssid)
+  iface=$(get_wifi_iface)
+  wifi_status_text=$(cmd wifi status 2>/dev/null)
+  wifi_status=$(is_wifi_connected "${iface}")
+  ssid=$(get_current_ssid "${iface}" "${wifi_status_text}")
+  bssid=$(get_current_bssid "${iface}" "${wifi_status_text}")
 
   control_log_msg "--- 网络状态检查 ---"
 
   if [ "${wifi_status}" = "wifi" ]; then
-    for i in 1 2 3; do
-      wifi_ip=$(get_wifi_ip)
+    for i in 1 2 3 4 5 6; do
+      wifi_ip=$(get_wifi_ip "${iface}")
       [ -n "${wifi_ip}" ] && break
-      sleep 1
+      busybox sleep 0.5
     done
 
     if [ -z "${wifi_ip}" ]; then
@@ -324,10 +320,18 @@ apply_network_control_policy() {
     fi
 
     control_log_msg "WiFi: ${ssid}, BSSID: ${bssid}, IP: ${wifi_ip}"
-    save_wifi_state "${ssid}" "${bssid}" "${wifi_ip}"
   else
     control_log_msg "WiFi: 已断开"
   fi
+
+  local state_key="${wifi_status}|${ssid}|${bssid}|${wifi_ip}"
+  local prev_key=""
+  [ -f "${CTRL_WIFI_STATE_FILE}" ] && prev_key=$(cat "${CTRL_WIFI_STATE_FILE}" 2>/dev/null)
+  if [ "${state_key}" = "${prev_key}" ]; then
+    control_log_msg "网络状态未变化，跳过策略"
+    return 0
+  fi
+  save_wifi_state "${state_key}"
 
   if should_enable_service "${wifi_status}" "${ssid}" "${bssid}"; then
     control_log_msg "策略：启用服务"

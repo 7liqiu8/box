@@ -8,6 +8,30 @@ cnip_force_proxy_uid_list="${box_run_state}/cnip_force_proxy.uid.list"
 cap_cache_file="${box_run_state}/iptables.cap.env"
 ipset_stamp_dir="${box_run_state}/ipset.stamp"
 
+boxbpf_bin="${bin_dir}/boxbpf"
+ebpf_state_dir="${box_run_state}/ebpf"
+ebpf_rule_config="${ebpf_state_dir}/rule-config.json"
+ebpf_pin_dir="/sys/fs/bpf/box"
+ebpf_cidr_out4="${ebpf_pin_dir}/box_cidr_out4"
+ebpf_cidr_out6="${ebpf_pin_dir}/box_cidr_out6"
+ebpf_cidr_pre4="${ebpf_pin_dir}/box_cidr_pre4"
+ebpf_cidr_pre6="${ebpf_pin_dir}/box_cidr_pre6"
+ebpf_force_out4="${ebpf_pin_dir}/box_force_out4"
+ebpf_force_out6="${ebpf_pin_dir}/box_force_out6"
+ebpf_app_out4="${ebpf_pin_dir}/box_uid_out4"
+ebpf_app_out6="${ebpf_pin_dir}/box_uid_out6"
+ebpf_map_runtime="${ebpf_pin_dir}/box_runtime_cfg"
+ebpf_map_cidr4="${ebpf_pin_dir}/box_cidr4_lpm"
+ebpf_map_cidr6="${ebpf_pin_dir}/box_cidr6_lpm"
+ebpf_map_force_uid="${ebpf_pin_dir}/box_force_uid_set"
+ebpf_map_app_uid="${ebpf_pin_dir}/box_app_uid_set"
+
+box_batch_active="false"
+box_batch_family=""
+box_batch_restore=""
+box_batch_declared=""
+box_batch_tables=""
+
 fwmark="16777216/16777216"
 table="2024"
 pref="100"
@@ -19,10 +43,14 @@ tun_route_pref="99"
 # 是否通过 iptables 规则拦截 QUIC。开启后，部分仅支持 QUIC 的站点可能无法访问。
 quic=${quic:-"enable"}
 performance_mode=${performance_mode:-"false"}
+# 大陆IP分流匹配方式
+cnip_mode="${cnip_mode:-}"
 proxy_tcp=${proxy_tcp:-"true"}
 proxy_udp=${proxy_udp:-"true"}
 dns_hijack_tcp=${dns_hijack_tcp:-"true"}
 dns_hijack_udp=${dns_hijack_udp:-"true"}
+force_proxy_cidrs=(${force_proxy_cidrs[@]})
+force_proxy_cidrs6=(${force_proxy_cidrs6[@]})
 fake_ip_range=""
 fake_ip6_range=""
 stack="${stack:-gvisor}"
@@ -39,15 +67,13 @@ if [ "$buildVersionMajor" -ge "$minBuildVersion" ]; then
   IP6V="ip6tables -w 100"
 fi
 
-chain_exists() {
-  local table_name="$1"
-  local chain_name="$2"
-  ${iptables} -t "${table_name}" -L "${chain_name}" >/dev/null 2>&1
-}
-
 ensure_chain() {
   local table_name="$1"
   local chain_name="$2"
+  # box 自定义链的声明进入批量缓冲；命中即跳过 live。
+  if batch_record_chain "${table_name}" "${chain_name}"; then
+    return 0
+  fi
   ${iptables} -t "${table_name}" -N "${chain_name}" >/dev/null 2>&1 || true
   ${iptables} -t "${table_name}" -F "${chain_name}" >/dev/null 2>&1 || true
 }
@@ -56,17 +82,9 @@ ensure_jump() {
   local table_name="$1"
   local parent_chain="$2"
   local target_chain="$3"
+  flush_batch
   if ! ${iptables} -t "${table_name}" -C "${parent_chain}" -j "${target_chain}" >/dev/null 2>&1; then
     ${iptables} -t "${table_name}" -I "${parent_chain}" -j "${target_chain}"
-  fi
-}
-
-del_jump_if_exists() {
-  local table_name="$1"
-  local parent_chain="$2"
-  local target_chain="$3"
-  if ${iptables} -t "${table_name}" -C "${parent_chain}" -j "${target_chain}" >/dev/null 2>&1; then
-    ${iptables} -t "${table_name}" -D "${parent_chain}" -j "${target_chain}" >/dev/null 2>&1 || true
   fi
 }
 
@@ -74,16 +92,8 @@ del_jump_silent() {
   local table_name="$1"
   local parent_chain="$2"
   local target_chain="$3"
+  flush_batch
   ${iptables} -t "${table_name}" -D "${parent_chain}" -j "${target_chain}" >/dev/null 2>&1 || true
-}
-
-cleanup_chain() {
-  local table_name="$1"
-  local chain_name="$2"
-  if chain_exists "${table_name}" "${chain_name}"; then
-    ${iptables} -t "${table_name}" -F "${chain_name}" >/dev/null 2>&1 || true
-    ${iptables} -t "${table_name}" -X "${chain_name}" >/dev/null 2>&1 || true
-  fi
 }
 
 ensure_rule_append() {
@@ -93,9 +103,14 @@ ensure_rule_append() {
   # 自定义链每次启动都会先清空，直接追加即可，避免重复做 -C 检查。
   # 内置链仍需保留检查，避免规则重复累积。
   if is_box_custom_chain "${chain_name}"; then
+    # box 自定义链的追加进入批量缓冲；命中即跳过 live。
+    if batch_record_append "${table_name}" "${chain_name}" "$@"; then
+      return 0
+    fi
     ${iptables} -t "${table_name}" -A "${chain_name}" "$@" >/dev/null 2>&1 || true
     return 0
   fi
+  flush_batch
   if ! ${iptables} -t "${table_name}" -C "${chain_name}" "$@" >/dev/null 2>&1; then
     ${iptables} -t "${table_name}" -A "${chain_name}" "$@"
   fi
@@ -105,7 +120,8 @@ ensure_rule_insert() {
   local table_name="$1"
   local chain_name="$2"
   shift 2
-  # 自定义链每次启动都会先清空，直接插入即可，避免重复做 -C 检查。
+  # 插入位置敏感，始终 live（先 flush 保证目标链已物化、保序）。
+  flush_batch
   if is_box_custom_chain "${chain_name}"; then
     ${iptables} -t "${table_name}" -I "${chain_name}" "$@" >/dev/null 2>&1 || true
     return 0
@@ -133,6 +149,7 @@ add_core_bypass_rule() {
   local insert_action="$3"
 
   [ -n "${insert_action}" ] || insert_action="-A"
+  flush_batch
 
   if ${iptables} -t "${table_name}" "${insert_action}" "${chain_name}" -m owner --uid-owner "${box_user}" --gid-owner "${box_group}" -j RETURN >/dev/null 2>&1; then
     return 0
@@ -147,27 +164,148 @@ add_core_bypass_rule() {
   return 1
 }
 
-del_rule_if_exists() {
-  local table_name="$1"
-  local chain_name="$2"
-  shift 2
-  if ${iptables} -t "${table_name}" -C "${chain_name}" "$@" >/dev/null 2>&1; then
-    ${iptables} -t "${table_name}" -D "${chain_name}" "$@" >/dev/null 2>&1 || true
-  fi
-}
-
 del_rule_silent() {
   local table_name="$1"
   local chain_name="$2"
   shift 2
+  flush_batch
   ${iptables} -t "${table_name}" -D "${chain_name}" "$@" >/dev/null 2>&1 || true
 }
 
 cleanup_chain_fast() {
   local table_name="$1"
   local chain_name="$2"
+  flush_batch
   ${iptables} -t "${table_name}" -F "${chain_name}" >/dev/null 2>&1 || true
   ${iptables} -t "${table_name}" -X "${chain_name}" >/dev/null 2>&1 || true
+}
+
+# iptables-restore 批量下发
+restore_supported() {
+  if [ "${iptables}" = "$IPV" ]; then
+    [ "${cap_restore4}" = "true" ]
+  else
+    [ "${cap_restore6}" = "true" ]
+  fi
+}
+
+batch_buffer_file() {
+  printf '%s\n' "${box_run_state}/.batch.$1"
+}
+
+begin_batch() {
+  box_batch_active="false"
+  if [ "${iptables}" = "$IPV" ]; then
+    box_batch_restore="iptables-restore"
+  else
+    box_batch_restore="ip6tables-restore"
+  fi
+  restore_supported || return 0
+  rm -f "${box_run_state}"/.batch.* >/dev/null 2>&1 || true
+  box_batch_family="${iptables}"
+  box_batch_declared=" "
+  box_batch_tables=""
+  box_batch_active="true"
+}
+
+# 记录 box 自定义链声明（:chain - [0:0]）。同一 session 内每链只声明一次（重复声明会清空已有规则）。
+batch_record_chain() {
+  local table="$1"
+  local chain="$2"
+  [ "${box_batch_active}" = "true" ] || return 1
+  [ "${box_batch_family}" = "${iptables}" ] || return 1
+  is_box_custom_chain "${chain}" || return 1
+  case "${box_batch_declared}" in
+    *" ${table}:${chain} "*) return 0 ;;
+  esac
+  printf ':%s - [0:0]\n' "${chain}" >> "$(batch_buffer_file "${table}")"
+  box_batch_declared="${box_batch_declared}${table}:${chain} "
+  case " ${box_batch_tables} " in
+    *" ${table} "*) ;;
+    *) box_batch_tables="${box_batch_tables} ${table}" ;;
+  esac
+  return 0
+}
+
+# 记录一条追加规则（-A chain args...）。调用方已确认是 box 自定义链。
+batch_record_append() {
+  local table="$1"
+  local chain="$2"
+  shift 2
+  [ "${box_batch_active}" = "true" ] || return 1
+  [ "${box_batch_family}" = "${iptables}" ] || return 1
+  local f
+  f="$(batch_buffer_file "${table}")"
+  printf -- '-A %s' "${chain}" >> "${f}"
+  local arg
+  for arg in "$@"; do
+    printf ' %s' "${arg}" >> "${f}"
+  done
+  printf '\n' >> "${f}"
+  case " ${box_batch_tables} " in
+    *" ${table} "*) ;;
+    *) box_batch_tables="${box_batch_tables} ${table}" ;;
+  esac
+  return 0
+}
+
+# restore 失败时逐条 live 重放缓冲内容（结果与未批量时一致）。
+batch_replay_live() {
+  local table="$1"
+  local f="$2"
+  local line chain rest
+  while IFS= read -r line; do
+    case "${line}" in
+      :*)
+        chain="${line#:}"
+        chain="${chain%% *}"
+        ${iptables} -t "${table}" -N "${chain}" >/dev/null 2>&1 || true
+        ${iptables} -t "${table}" -F "${chain}" >/dev/null 2>&1 || true
+        ;;
+      "-A "*)
+        rest="${line#-A }"
+        ${iptables} -t "${table}" -A ${rest} >/dev/null 2>&1 || true
+        ;;
+    esac
+  done < "${f}"
+}
+
+# 把各表缓冲一次性提交（任何 live 命令前调用以保序）。失败回退逐条重放。
+flush_batch() {
+  [ "${box_batch_active}" = "true" ] || return 0
+  local table f
+  for table in ${box_batch_tables}; do
+    f="$(batch_buffer_file "${table}")"
+    [ -s "${f}" ] || continue
+    if ! { printf '*%s\n' "${table}"; cat "${f}"; printf 'COMMIT\n'; } | ${box_batch_restore} -w 100 --noflush >/dev/null 2>&1; then
+      batch_replay_live "${table}" "${f}"
+    fi
+    : > "${f}"
+  done
+  box_batch_tables=""
+}
+
+end_batch() {
+  flush_batch
+  box_batch_active="false"
+  box_batch_family=""
+  box_batch_declared=""
+  box_batch_tables=""
+}
+
+probe_restore_support() {
+  local family="$1"
+  local cmd ipt probe_chain="BOX_RESTORE_PROBE"
+  if [ "${family}" = "6" ]; then
+    cmd="ip6tables-restore"; ipt="$IP6V"
+  else
+    cmd="iptables-restore"; ipt="$IPV"
+  fi
+  command -v "${cmd}" >/dev/null 2>&1 || return 1
+  printf '*mangle\n:%s - [0:0]\nCOMMIT\n' "${probe_chain}" | ${cmd} -w 100 --noflush >/dev/null 2>&1 || return 1
+  ${ipt} -t mangle -F "${probe_chain}" >/dev/null 2>&1 || true
+  ${ipt} -t mangle -X "${probe_chain}" >/dev/null 2>&1 || true
+  return 0
 }
 
 ip_rule_exists() {
@@ -279,6 +417,8 @@ runtime_save() {
     printf 'bypass_cn_ip="%s"\n' "${bypass_cn_ip}"
     printf 'bypass_cn_ip_v4="%s"\n' "${bypass_cn_ip_v4}"
     printf 'bypass_cn_ip_v6="%s"\n' "${bypass_cn_ip_v6}"
+    printf 'force_proxy_cidrs=(%s)\n' "${force_proxy_cidrs[*]}"
+    printf 'force_proxy_cidrs6=(%s)\n' "${force_proxy_cidrs6[*]}"
     printf 'box_user="%s"\n' "${box_user}"
     printf 'box_group="%s"\n' "${box_group}"
   } >"${runtime_iptables_env}" 2>/dev/null
@@ -365,6 +505,9 @@ load_capability_cache() {
   [ -n "${cap_connmark_target}" ] || return 1
   [ -n "${cap_ipset}" ] || return 1
   [ -n "${cap_ip6_nat}" ] || return 1
+  [ -n "${cap_bpf_match}" ] || return 1
+  [ -n "${cap_restore4}" ] || return 1
+  [ -n "${cap_restore6}" ] || return 1
 
   log Debug "能力探测: 使用缓存 ${cap_cache_file}"
   return 0
@@ -388,6 +531,9 @@ save_capability_cache() {
     printf 'cap_connmark_target="%s"\n' "${cap_connmark_target}"
     printf 'cap_ipset="%s"\n' "${cap_ipset}"
     printf 'cap_ip6_nat="%s"\n' "${cap_ip6_nat}"
+    printf 'cap_bpf_match="%s"\n' "${cap_bpf_match}"
+    printf 'cap_restore4="%s"\n' "${cap_restore4}"
+    printf 'cap_restore6="%s"\n' "${cap_restore6}"
   } > "${cap_cache_file}" 2>/dev/null
 }
 
@@ -431,6 +577,9 @@ probe_capabilities() {
   cap_connmark_target="false"
   cap_ipset="false"
   cap_ip6_nat="false"
+  cap_bpf_match="false"
+  cap_restore4="false"
+  cap_restore6="false"
 
   cap_has_target 4 TPROXY && cap_tproxy4="true"
   cap_has_target 6 TPROXY && cap_tproxy6="true"
@@ -453,9 +602,12 @@ probe_capabilities() {
 
   command -v ipset >/dev/null 2>&1 && cap_ipset="true"
   ip6_nat_supported && cap_ip6_nat="true"
+  (cap_has_match 4 bpf || cap_has_match 6 bpf) && cap_bpf_match="true"
+  probe_restore_support 4 && cap_restore4="true"
+  probe_restore_support 6 && cap_restore6="true"
   save_capability_cache || true
 
-  log Debug "能力探测: TPROXY(v4=${cap_tproxy4}, v6=${cap_tproxy6}) socket_match=${cap_socket_match}/${cap_socket_transparent} conntrack=${cap_conntrack_match} connmark(match=${cap_connmark_match}, target=${cap_connmark_target}) ipset=${cap_ipset} ip6_nat=${cap_ip6_nat}"
+  log Debug "能力探测: TPROXY(v4=${cap_tproxy4}, v6=${cap_tproxy6}) socket_match=${cap_socket_match}/${cap_socket_transparent} conntrack=${cap_conntrack_match} connmark(match=${cap_connmark_match}, target=${cap_connmark_target}) ipset=${cap_ipset} ip6_nat=${cap_ip6_nat} bpf_match=${cap_bpf_match} restore=${cap_restore4}/${cap_restore6}"
 }
 
 log_context() {
@@ -470,7 +622,7 @@ log_context() {
 }
 
 log_capabilities() {
-  log Info "能力: tproxy4=${cap_tproxy4}, tproxy6=${cap_tproxy6}, socket_match=${cap_socket_match}/${cap_socket_transparent}, conntrack=${cap_conntrack_match}, connmark=${cap_connmark_match}/${cap_connmark_target}, ipset=${cap_ipset}, ip6_nat=${cap_ip6_nat}"
+  log Info "能力: tproxy4=${cap_tproxy4}, tproxy6=${cap_tproxy6}, socket_match=${cap_socket_match}/${cap_socket_transparent}, conntrack=${cap_conntrack_match}, connmark=${cap_connmark_match}/${cap_connmark_target}, ipset=${cap_ipset}, ip6_nat=${cap_ip6_nat}, bpf_match=${cap_bpf_match}"
 }
 
 apply_capability_downgrades() {
@@ -490,11 +642,33 @@ apply_capability_downgrades() {
     dns_hijack_mode="redirect"
   fi
 
-  if [ "${bypass_cn_ip}" = "true" ] && [ "${cap_ipset}" != "true" ]; then
-    log Warning "降级: ipset 不可用，大陆IP分流 true -> false"
-    bypass_cn_ip="false"
-    bypass_cn_ip_v4="false"
-    bypass_cn_ip_v6="false"
+  # CNIP 模式严格校验：必须明确 ipset 或 ebpf。任一前提不满足都报错并停用大陆IP分流，
+  # 绝不回退到另一种模式（cnip_mode=ebpf 不可用时不会偷偷改用 ipset）。
+  if [ "${bypass_cn_ip}" = "true" ]; then
+    case "${cnip_mode}" in
+      ipset)
+        if [ "${cap_ipset}" != "true" ]; then
+          log Error "CNIP: cnip_mode=ipset 但设备不支持 ipset，已停用大陆IP分流（不回退）。"
+          bypass_cn_ip="false"
+          bypass_cn_ip_v4="false"
+          bypass_cn_ip_v6="false"
+        fi
+        ;;
+      ebpf)
+        if ! ebpf_runtime_available; then
+          log Error "CNIP: cnip_mode=ebpf 但 eBPF 不可用（缺 -m bpf 支持或 boxbpf 无法运行），已停用大陆IP分流（不回退 ipset）。"
+          bypass_cn_ip="false"
+          bypass_cn_ip_v4="false"
+          bypass_cn_ip_v6="false"
+        fi
+        ;;
+      *)
+        log Error "CNIP: cnip_mode='${cnip_mode}' 无效（须为 ipset 或 ebpf），已停用大陆IP分流。"
+        bypass_cn_ip="false"
+        bypass_cn_ip_v4="false"
+        bypass_cn_ip_v6="false"
+        ;;
+    esac
   fi
 
   [ "${_old_mode}" != "${network_mode}" ] && log Info "最终 网络模式=${network_mode}"
@@ -790,16 +964,24 @@ append_common_bypass_rules() {
     for subnet in ${intranet[@]} ; do
       ensure_rule_append "${table_name}" "${chain_name}" -d ${subnet} -j RETURN
     done
-    if [ "${bypass_cn_ip}" = "true" ] && [ "${bypass_cn_ip_v4}" = "true" ] && command -v ipset >/dev/null 2>&1; then
-      ensure_rule_append "${table_name}" "${chain_name}" -m set --match-set cnip dst -j RETURN
+    if cnip_matcher_enabled_for_family; then
+      if cnip_uses_ebpf; then
+        ensure_rule_append "${table_name}" "${chain_name}" -m bpf --object-pinned "$(cnip_ebpf_pin_path "${chain_name}")" -j RETURN
+      else
+        ensure_rule_append "${table_name}" "${chain_name}" -m set --match-set cnip dst -j RETURN
+      fi
     fi
     ensure_rule_append "${table_name}" "${chain_name}" -j LOCAL_IP_V4
   else
     for subnet6 in ${intranet6[@]} ; do
       ensure_rule_append "${table_name}" "${chain_name}" -d ${subnet6} -j RETURN
     done
-    if [ "${bypass_cn_ip}" = "true" ] && [ "${bypass_cn_ip_v6}" = "true" ] && command -v ipset >/dev/null 2>&1; then
-      ensure_rule_append "${table_name}" "${chain_name}" -m set --match-set cnip6 dst -j RETURN
+    if cnip_matcher_enabled_for_family; then
+      if cnip_uses_ebpf; then
+        ensure_rule_append "${table_name}" "${chain_name}" -m bpf --object-pinned "$(cnip_ebpf_pin_path "${chain_name}")" -j RETURN
+      else
+        ensure_rule_append "${table_name}" "${chain_name}" -m set --match-set cnip6 dst -j RETURN
+      fi
     fi
     ensure_rule_append "${table_name}" "${chain_name}" -j LOCAL_IP_V6
   fi
@@ -813,7 +995,29 @@ append_cnip_force_proxy_local_rules() {
 
   [ "${bypass_cn_ip}" = "true" ] || return 0
   cnip_force_proxy_uid_list_has_entries || return 0
-  command -v ipset >/dev/null 2>&1 || return 0
+  cnip_matcher_enabled_for_family || return 0
+
+  # eBPF：force-uid 集合 + CN-CIDR 由 force pin 内部判定，单条 -m bpf 取代逐 UID 循环。
+  if cnip_uses_ebpf; then
+    local force_pin
+    force_pin="$(cnip_force_ebpf_pin_path)"
+    case "${action}" in
+      redirect)
+        [ "${proxy_tcp}" = "true" ] && append_redirect_dispatch_rule "${chain_name}" -p tcp -m bpf --object-pinned "${force_pin}"
+        ;;
+      mark)
+        if [ "${network_mode}" != "enhance" ] && [ "${proxy_tcp}" = "true" ]; then
+          ensure_rule_append "${table_name}" "${chain_name}" -p tcp -m bpf --object-pinned "${force_pin}" -j MARK --set-xmark "${fwmark}"
+          ensure_rule_append "${table_name}" "${chain_name}" -p tcp -m bpf --object-pinned "${force_pin}" -j RETURN
+        fi
+        if [ "${proxy_udp}" = "true" ]; then
+          ensure_rule_append "${table_name}" "${chain_name}" -p udp -m bpf --object-pinned "${force_pin}" -j MARK --set-xmark "${fwmark}"
+          ensure_rule_append "${table_name}" "${chain_name}" -p udp -m bpf --object-pinned "${force_pin}" -j RETURN
+        fi
+        ;;
+    esac
+    return 0
+  fi
 
   if [ "${iptables}" = "$IPV" ]; then
     [ "${bypass_cn_ip_v4}" = "true" ] || return 0
@@ -850,7 +1054,22 @@ append_cnip_force_proxy_tun_rules() {
 
   [ "${bypass_cn_ip}" = "true" ] || return 0
   cnip_force_proxy_uid_list_has_entries || return 0
-  command -v ipset >/dev/null 2>&1 || return 0
+  cnip_matcher_enabled_for_family || return 0
+
+  # eBPF：force pin 内部判定 force-uid + CN-CIDR，单条 -m bpf 取代逐 UID 循环。
+  if cnip_uses_ebpf; then
+    local force_pin
+    force_pin="$(cnip_force_ebpf_pin_path)"
+    if [ "${proxy_tcp}" = "true" ]; then
+      ensure_rule_append mangle "${chain_name}" -p tcp -m bpf --object-pinned "${force_pin}" -j MARK --set-xmark "${tun_route_mark}"
+      ensure_rule_append mangle "${chain_name}" -p tcp -m bpf --object-pinned "${force_pin}" -j RETURN
+    fi
+    if [ "${proxy_udp}" = "true" ]; then
+      ensure_rule_append mangle "${chain_name}" -p udp -m bpf --object-pinned "${force_pin}" -j MARK --set-xmark "${tun_route_mark}"
+      ensure_rule_append mangle "${chain_name}" -p udp -m bpf --object-pinned "${force_pin}" -j RETURN
+    fi
+    return 0
+  fi
 
   if [ "${iptables}" = "$IPV" ]; then
     [ "${bypass_cn_ip_v4}" = "true" ] || return 0
@@ -888,7 +1107,10 @@ append_local_protocol_rule() {
   fi
 
   set -- -p "${proto}"
-  if [ -n "${owner_kind}" ] && [ -n "${owner_value}" ]; then
+  if [ "${owner_kind}" = "bpf" ] && [ -n "${owner_value}" ]; then
+    # owner_value 为 eBPF UID pin 路径，用 -m bpf 取代 -m owner（performance UID 匹配）。
+    set -- "$@" -m bpf --object-pinned "${owner_value}"
+  elif [ -n "${owner_kind}" ] && [ -n "${owner_value}" ]; then
     set -- "$@" -m owner "--${owner_kind}" "${owner_value}"
   fi
 
@@ -918,7 +1140,9 @@ apply_local_proxy_rules() {
       [ "${iptables}" = "$IPV" ] && [ "${network_mode}" != "enhance" ] && log Info "核心模式：所有应用透明代理。"
       ;;
     blacklist|black)
-      if uid_list_has_entries; then
+      if app_uid_ebpf_active; then
+        ensure_rule_append "${table_name}" "${chain_name}" -m bpf --object-pinned "$(app_uid_ebpf_pin_path)" -j RETURN
+      elif uid_list_has_entries; then
         while read -r appid; do
           ensure_rule_append "${table_name}" "${chain_name}" -m owner --uid-owner "${appid}" -j RETURN
         done < "${uid_list}"
@@ -939,7 +1163,14 @@ apply_local_proxy_rules() {
       fi
       ;;
     whitelist|white)
-      if uid_list_has_entries; then
+      if app_uid_ebpf_active; then
+        append_local_protocol_rule "${table_name}" "${chain_name}" tcp "${action}" "bpf" "$(app_uid_ebpf_pin_path)"
+        append_local_protocol_rule "${table_name}" "${chain_name}" udp "${action}" "bpf" "$(app_uid_ebpf_pin_path)"
+        append_local_protocol_rule "${table_name}" "${chain_name}" tcp "${action}" "uid-owner" "0"
+        append_local_protocol_rule "${table_name}" "${chain_name}" udp "${action}" "uid-owner" "0"
+        append_local_protocol_rule "${table_name}" "${chain_name}" tcp "${action}" "uid-owner" "1052"
+        append_local_protocol_rule "${table_name}" "${chain_name}" udp "${action}" "uid-owner" "1052"
+      elif uid_list_has_entries; then
         while read -r appid; do
           append_local_protocol_rule "${table_name}" "${chain_name}" tcp "${action}" "uid-owner" "${appid}"
           append_local_protocol_rule "${table_name}" "${chain_name}" udp "${action}" "uid-owner" "${appid}"
@@ -1053,6 +1284,76 @@ append_tun_fake_ip_route_rules() {
   ensure_rule_append mangle "${chain_name}" -d "${fake_range}" -j RETURN
 }
 
+append_force_proxy_destination_rule() {
+  local chain_name="$1"
+  local action="$2"
+  shift 2
+
+  case "${action}" in
+    route)
+      append_mark_and_return_rule mangle "${chain_name}" "${tun_route_mark}" "$@"
+      ;;
+    redirect)
+      [ "${proxy_tcp}" = "true" ] && append_redirect_dispatch_rule "${chain_name}" -p tcp "$@"
+      ;;
+    tproxy)
+      [ "${network_mode}" != "enhance" ] && [ "${proxy_tcp}" = "true" ] && append_tproxy_dispatch_rule "${chain_name}" -p tcp "$@"
+      [ "${proxy_udp}" = "true" ] && append_tproxy_dispatch_rule "${chain_name}" -p udp "$@"
+      ;;
+  esac
+}
+
+append_force_proxy_destination_rules() {
+  local chain_name="$1"
+  local action="$2"
+
+  if [ "${iptables}" = "$IPV" ]; then
+    for subnet in ${force_proxy_cidrs[@]} ; do
+      [ -n "${subnet}" ] || continue
+      append_force_proxy_destination_rule "${chain_name}" "${action}" -d "${subnet}"
+    done
+  else
+    for subnet6 in ${force_proxy_cidrs6[@]} ; do
+      [ -n "${subnet6}" ] || continue
+      append_force_proxy_destination_rule "${chain_name}" "${action}" -d "${subnet6}"
+    done
+  fi
+}
+
+append_mark_force_proxy_destination_rule() {
+  local table_name="$1"
+  local chain_name="$2"
+  shift 2
+
+  [ "${network_mode}" != "enhance" ] && [ "${proxy_tcp}" = "true" ] && append_mark_and_return_rule "${table_name}" "${chain_name}" "${fwmark}" -p tcp "$@"
+  [ "${proxy_udp}" = "true" ] && append_mark_and_return_rule "${table_name}" "${chain_name}" "${fwmark}" -p udp "$@"
+}
+
+append_mark_force_proxy_destination_rules() {
+  local table_name="$1"
+  local chain_name="$2"
+
+  if [ "${iptables}" = "$IPV" ]; then
+    for subnet in ${force_proxy_cidrs[@]} ; do
+      [ -n "${subnet}" ] || continue
+      append_mark_force_proxy_destination_rule "${table_name}" "${chain_name}" -d "${subnet}"
+    done
+  else
+    for subnet6 in ${force_proxy_cidrs6[@]} ; do
+      [ -n "${subnet6}" ] || continue
+      append_mark_force_proxy_destination_rule "${table_name}" "${chain_name}" -d "${subnet6}"
+    done
+  fi
+}
+
+append_redirect_force_proxy_destination_rules() {
+  append_force_proxy_destination_rules "$1" redirect
+}
+
+append_tproxy_force_proxy_destination_rules() {
+  append_force_proxy_destination_rules "$1" tproxy
+}
+
 append_tun_bypass_destination_rules() {
   local chain_name="$1"
   local set_name=""
@@ -1069,9 +1370,13 @@ append_tun_bypass_destination_rules() {
     done
   fi
 
-  if [ "${bypass_cn_ip}" = "true" ] && command -v ipset >/dev/null 2>&1; then
-    set_name="$(current_cnip_set_name)"
-    [ -n "${set_name}" ] && ensure_rule_append mangle "${chain_name}" -m set --match-set "${set_name}" dst -j MARK --set-xmark "${tun_bypass_mark}"
+  if cnip_matcher_enabled_for_family; then
+    if cnip_uses_ebpf; then
+      ensure_rule_append mangle "${chain_name}" -m bpf --object-pinned "$(cnip_ebpf_pin_path "${chain_name}")" -j MARK --set-xmark "${tun_bypass_mark}"
+    else
+      set_name="$(current_cnip_set_name)"
+      [ -n "${set_name}" ] && ensure_rule_append mangle "${chain_name}" -m set --match-set "${set_name}" dst -j MARK --set-xmark "${tun_bypass_mark}"
+    fi
   fi
 
   ensure_rule_append mangle "${chain_name}" -m mark --mark "${tun_bypass_mark}" -j RETURN
@@ -1420,15 +1725,23 @@ setup_perf_dest_chain() {
     for subnet in ${intranet[@]} ; do
       append_perf_bypass_target "${table_name}" "${chain_name}" -d ${subnet}
     done
-    if [ "${bypass_cn_ip}" = "true" ] && [ "${bypass_cn_ip_v4}" = "true" ] && command -v ipset >/dev/null 2>&1; then
-      append_perf_bypass_target "${table_name}" "${chain_name}" -m set --match-set cnip dst
+    if cnip_matcher_enabled_for_family; then
+      if cnip_uses_ebpf; then
+        append_perf_bypass_target "${table_name}" "${chain_name}" -m bpf --object-pinned "$(cnip_ebpf_pin_path "${chain_name}")"
+      else
+        append_perf_bypass_target "${table_name}" "${chain_name}" -m set --match-set cnip dst
+      fi
     fi
   else
     for subnet6 in ${intranet6[@]} ; do
       append_perf_bypass_target "${table_name}" "${chain_name}" -d ${subnet6}
     done
-    if [ "${bypass_cn_ip}" = "true" ] && [ "${bypass_cn_ip_v6}" = "true" ] && command -v ipset >/dev/null 2>&1; then
-      append_perf_bypass_target "${table_name}" "${chain_name}" -m set --match-set cnip6 dst
+    if cnip_matcher_enabled_for_family; then
+      if cnip_uses_ebpf; then
+        append_perf_bypass_target "${table_name}" "${chain_name}" -m bpf --object-pinned "$(cnip_ebpf_pin_path "${chain_name}")"
+      else
+        append_perf_bypass_target "${table_name}" "${chain_name}" -m set --match-set cnip6 dst
+      fi
     fi
   fi
 
@@ -1493,7 +1806,9 @@ setup_perf_out_app_chain() {
 
   case "${proxy_mode}" in
     blacklist|black)
-      if uid_list_has_entries; then
+      if app_uid_ebpf_active; then
+        ensure_rule_append "${table_name}" "${chain_name}" -m bpf --object-pinned "$(app_uid_ebpf_pin_path)" -j ACCEPT
+      elif uid_list_has_entries; then
         while read -r appid; do
           ensure_rule_append "${table_name}" "${chain_name}" -m owner --uid-owner "${appid}" -j ACCEPT
         done < "${uid_list}"
@@ -1506,7 +1821,12 @@ setup_perf_out_app_chain() {
       ;;
     whitelist|white)
       local _has_whitelist="false"
-      if uid_list_has_entries; then
+      if app_uid_ebpf_active; then
+        ensure_rule_append "${table_name}" "${chain_name}" -m bpf --object-pinned "$(app_uid_ebpf_pin_path)" -j RETURN
+        ensure_rule_append "${table_name}" "${chain_name}" -m owner --uid-owner 0 -j RETURN
+        ensure_rule_append "${table_name}" "${chain_name}" -m owner --uid-owner 1052 -j RETURN
+        _has_whitelist="true"
+      elif uid_list_has_entries; then
         while read -r appid; do
           ensure_rule_append "${table_name}" "${chain_name}" -m owner --uid-owner "${appid}" -j RETURN
         done < "${uid_list}"
@@ -1540,6 +1860,7 @@ setup_redirect_perf_external_chain() {
   setup_perf_dest_chain nat "${ip_chain}"
   setup_perf_pre_if_chain nat "${if_chain}"
 
+  append_redirect_force_proxy_destination_rules BOX_EXTERNAL
   add_perf_chain_jumps nat BOX_EXTERNAL "${ip_chain}" "${if_chain}"
 
   if [ "${proxy_tcp}" = "true" ]; then
@@ -1564,6 +1885,7 @@ setup_redirect_perf_local_chain() {
   setup_perf_dest_chain nat "${ip_chain}"
   setup_perf_out_app_chain nat "${app_chain}"
 
+  append_redirect_force_proxy_destination_rules BOX_LOCAL
   add_perf_chain_jumps nat BOX_LOCAL "${app_chain}" "${ip_chain}"
 
   if [ "${proxy_tcp}" = "true" ]; then
@@ -1599,6 +1921,7 @@ setup_tproxy_perf_external_chain() {
   apply_mangle_dns_rules BOX_EXTERNAL tproxy
   apply_tproxy_ipv6_fakeip_rules BOX_EXTERNAL tproxy
 
+  append_tproxy_force_proxy_destination_rules BOX_EXTERNAL
   add_perf_chain_jumps mangle BOX_EXTERNAL "${ip_chain}" "${if_chain}"
 
   append_tproxy_perf_connmark_rules BOX_EXTERNAL
@@ -1627,6 +1950,7 @@ setup_tproxy_perf_local_chain() {
   apply_tproxy_ipv6_fakeip_rules BOX_LOCAL mark
   append_cnip_force_proxy_local_rules mangle BOX_LOCAL mark
 
+  append_mark_force_proxy_destination_rules mangle BOX_LOCAL
   add_perf_chain_jumps mangle BOX_LOCAL "${ip_chain}" "${app_chain}"
   apply_mangle_dns_rules BOX_LOCAL mark
 
@@ -1652,6 +1976,7 @@ setup_tproxy_external_chain() {
   apply_tproxy_reply_bypass_rules BOX_EXTERNAL
   apply_mangle_dns_rules BOX_EXTERNAL tproxy
   apply_tproxy_ipv6_fakeip_rules BOX_EXTERNAL tproxy
+  append_tproxy_force_proxy_destination_rules BOX_EXTERNAL
   append_common_bypass_rules mangle BOX_EXTERNAL
   apply_ignored_external_interfaces mangle BOX_EXTERNAL
   apply_external_loopback_rule mangle BOX_EXTERNAL tproxy
@@ -1670,6 +1995,7 @@ setup_tproxy_local_chain() {
   apply_mangle_dns_rules BOX_LOCAL mark
   apply_tproxy_ipv6_fakeip_rules BOX_LOCAL mark
   append_cnip_force_proxy_local_rules mangle BOX_LOCAL mark
+  append_mark_force_proxy_destination_rules mangle BOX_LOCAL
   append_common_bypass_rules mangle BOX_LOCAL
   apply_local_proxy_rules mangle BOX_LOCAL mark
   finish_local_chain mangle BOX_LOCAL
@@ -1758,6 +2084,7 @@ setup_redirect_local_chain() {
   setup_local_chain_common nat BOX_LOCAL
   apply_redirect_reply_bypass_rules BOX_LOCAL
   append_cnip_force_proxy_local_rules nat BOX_LOCAL redirect
+  append_redirect_force_proxy_destination_rules BOX_LOCAL
   append_common_bypass_rules nat BOX_LOCAL
   apply_redirect_connmark_restore_rules BOX_LOCAL
   apply_local_proxy_rules nat BOX_LOCAL redirect
@@ -1774,6 +2101,7 @@ setup_redirect_external_chain() {
   setup_external_chain_common nat BOX_EXTERNAL
   apply_redirect_reply_bypass_rules BOX_EXTERNAL
   ensure_dns_nat_hijack
+  append_redirect_force_proxy_destination_rules BOX_EXTERNAL
   append_common_bypass_rules nat BOX_EXTERNAL
   apply_ignored_external_interfaces nat BOX_EXTERNAL
   apply_redirect_connmark_restore_rules BOX_EXTERNAL
@@ -2199,10 +2527,213 @@ ipset_write_stamp() {
   printf '%s\n' "${current_stamp}" > "${stamp_file}" 2>/dev/null
 }
 
+cnip_uses_ipset() { [ "${cnip_mode}" = "ipset" ]; }
+cnip_uses_ebpf()  { [ "${cnip_mode}" = "ebpf" ]; }
+
+ebpf_runtime_available() {
+  [ "${cap_bpf_match}" = "true" ] || return 1
+  [ -f "${boxbpf_bin}" ] || return 1
+  # 验证 boxbpf 能在本设备架构上实际执行
+  if [ -z "${_boxbpf_exec_ok}" ]; then
+    chmod 0755 "${boxbpf_bin}" 2>/dev/null
+    if "${boxbpf_bin}" --clear >/dev/null 2>&1; then
+      _boxbpf_exec_ok="yes"
+    else
+      _boxbpf_exec_ok="no"
+    fi
+  fi
+  [ "${_boxbpf_exec_ok}" = "yes" ]
+}
+
+cnip_bypass_enabled_for_family() {
+  [ "${bypass_cn_ip}" = "true" ] || return 1
+  if [ "${iptables}" = "$IPV" ]; then
+    [ "${bypass_cn_ip_v4}" = "true" ]
+  else
+    [ "${bypass_cn_ip_v6}" = "true" ]
+  fi
+}
+
+cnip_matcher_enabled_for_family() {
+  cnip_bypass_enabled_for_family || return 1
+  if cnip_uses_ebpf; then
+    [ "${cap_bpf_match}" = "true" ]
+  else
+    [ "${cap_ipset}" = "true" ]
+  fi
+}
+
+cnip_ebpf_requested() {
+  [ "${bypass_cn_ip}" = "true" ] && cnip_uses_ebpf
+}
+
+app_uid_ebpf_requested() {
+  [ "${performance_mode}" = "true" ] || return 1
+  uid_list_has_entries || return 1
+  case "${proxy_mode}" in
+    blacklist|black|whitelist|white) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+app_uid_ebpf_pin_loaded() {
+  if [ "${iptables}" = "$IPV" ]; then
+    [ -e "${ebpf_app_out4}" ]
+  else
+    [ -e "${ebpf_app_out6}" ]
+  fi
+}
+
+app_uid_ebpf_active() {
+  app_uid_ebpf_requested && app_uid_ebpf_pin_loaded
+}
+
+# CNIP CIDR pin：按链区分 PREROUTING/OUTPUT 程序，按 family 区分 v4/v6
+cnip_ebpf_pin_path() {
+  local chain="$1"
+  local pre="false"
+  case "${chain}" in
+    BOX_EXTERNAL|*_PRE|*_PRE_*) pre="true" ;;
+  esac
+  if [ "${iptables}" = "$IPV" ]; then
+    if [ "${pre}" = "true" ]; then printf '%s\n' "${ebpf_cidr_pre4}"; else printf '%s\n' "${ebpf_cidr_out4}"; fi
+  else
+    if [ "${pre}" = "true" ]; then printf '%s\n' "${ebpf_cidr_pre6}"; else printf '%s\n' "${ebpf_cidr_out6}"; fi
+  fi
+}
+
+cnip_force_ebpf_pin_path() {
+  if [ "${iptables}" = "$IPV" ]; then printf '%s\n' "${ebpf_force_out4}"; else printf '%s\n' "${ebpf_force_out6}"; fi
+}
+
+app_uid_ebpf_pin_path() {
+  if [ "${iptables}" = "$IPV" ]; then printf '%s\n' "${ebpf_app_out4}"; else printf '%s\n' "${ebpf_app_out6}"; fi
+}
+
+# 向 netd 域放行 bpf 操作（加载/读写 map）。依次尝试 magisk/apatch/ksu 工具。
+apply_ebpf_selinux_policy() {
+  local rule="allow netd * bpf { prog_run map_read map_write }"
+  local tool
+  for tool in magiskpolicy /data/adb/magisk/magiskpolicy supolicy /system/xbin/supolicy /system/bin/supolicy; do
+    "${tool}" --live "${rule}" >/dev/null 2>&1 && return 0
+  done
+  for tool in ksud /data/adb/ksud /data/adb/ksu/bin/ksud; do
+    "${tool}" sepolicy patch "${rule}" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+# 生成 boxbpf 的 JSON 配置（输入 CIDR/UID 列表文件 + 输出 pin 路径）
+write_rule_ebpf_config() {
+  mkdir -p "${ebpf_state_dir}" >/dev/null 2>&1 || true
+  local empty_v4="${ebpf_state_dir}/empty-v4.txt"
+  local empty_v6="${ebpf_state_dir}/empty-v6.txt"
+  local force_uids="${ebpf_state_dir}/force-uids.txt"
+  local app_uids="${ebpf_state_dir}/app-uids.txt"
+  : > "${empty_v4}"
+  : > "${empty_v6}"
+  if [ -s "${cnip_force_proxy_uid_list}" ]; then
+    cp "${cnip_force_proxy_uid_list}" "${force_uids}" 2>/dev/null || : > "${force_uids}"
+  else
+    : > "${force_uids}"
+  fi
+  local app_uid_path=""
+  if app_uid_ebpf_requested && [ -s "${uid_list}" ]; then
+    cp "${uid_list}" "${app_uids}" 2>/dev/null || : > "${app_uids}"
+    app_uid_path="${app_uids}"
+  fi
+  local cidr4="${empty_v4}"
+  local cidr6="${empty_v6}"
+  if cnip_ebpf_requested; then
+    [ "${bypass_cn_ip_v4}" = "true" ] && [ -f "${cn_ip_file}" ] && cidr4="${cn_ip_file}"
+    [ "${ipv6}" = "true" ] && [ "${bypass_cn_ip_v6}" = "true" ] && [ -f "${cn_ipv6_file}" ] && cidr6="${cn_ipv6_file}"
+  fi
+  local ipv6_json="false"
+  [ "${ipv6}" = "true" ] && ipv6_json="true"
+  cat > "${ebpf_rule_config}" <<EOF
+{
+  "ipv6": ${ipv6_json},
+  "cidrHitIsMatch": true,
+  "cidr4": "${cidr4}",
+  "cidr6": "${cidr6}",
+  "forceUids": "${force_uids}",
+  "appUids": "${app_uid_path}",
+  "pinCidrOut4": "${ebpf_cidr_out4}",
+  "pinCidrOut6": "${ebpf_cidr_out6}",
+  "pinCidrPre4": "${ebpf_cidr_pre4}",
+  "pinCidrPre6": "${ebpf_cidr_pre6}",
+  "pinForceOut4": "${ebpf_force_out4}",
+  "pinForceOut6": "${ebpf_force_out6}",
+  "pinAppOut4": "${ebpf_app_out4}",
+  "pinAppOut6": "${ebpf_app_out6}",
+  "mapRuntime": "${ebpf_map_runtime}",
+  "mapCidr4": "${ebpf_map_cidr4}",
+  "mapCidr6": "${ebpf_map_cidr6}",
+  "mapForceUid": "${ebpf_map_force_uid}",
+  "mapAppUid": "${ebpf_map_app_uid}"
+}
+EOF
+}
+
+run_ebpf_matcher() {
+  local action="$1"
+  local cfg="$2"
+  if [ -n "${cfg}" ]; then
+    "${boxbpf_bin}" "${action}" --config "${cfg}"
+  else
+    "${boxbpf_bin}" "${action}"
+  fi
+}
+
+# apply 阶段（建链之前）加载 eBPF 程序并 pin
+setup_rule_ebpf() {
+  cnip_ebpf_requested || app_uid_ebpf_requested || return 0
+  if ! ebpf_runtime_available; then
+    log Warning "eBPF 匹配器不可用（缺 -m bpf 或 boxbpf），跳过 eBPF 加载"
+    return 0
+  fi
+  write_rule_ebpf_config
+  apply_ebpf_selinux_policy
+  chmod 755 "${boxbpf_bin}" >/dev/null 2>&1 || true
+  run_ebpf_matcher --clear "" >/dev/null 2>&1 || true
+  if run_ebpf_matcher --apply "${ebpf_rule_config}" >/dev/null 2>&1; then
+    log Info "eBPF 规则匹配器已加载（cnip=${cnip_mode}）"
+  else
+    log Warning "eBPF 规则匹配器加载失败，CNIP/UID 匹配将退化为跳过/owner"
+  fi
+}
+
+# cnip reload：热更新 map（失败回退重新 apply）
+reload_rule_ebpf() {
+  cnip_ebpf_requested || app_uid_ebpf_requested || return 0
+  ebpf_runtime_available || return 0
+  write_rule_ebpf_config
+  apply_ebpf_selinux_policy
+  chmod 755 "${boxbpf_bin}" >/dev/null 2>&1 || true
+  if run_ebpf_matcher --update "${ebpf_rule_config}" >/dev/null 2>&1; then
+    log Info "eBPF map 已热更新"
+  else
+    log Warning "eBPF map 热更新失败，尝试重新加载"
+    run_ebpf_matcher --apply "${ebpf_rule_config}" >/dev/null 2>&1 || true
+  fi
+}
+
+# disable / apply 前清理 eBPF pin 与程序
+cleanup_rule_ebpf() {
+  if [ -f "${boxbpf_bin}" ]; then
+    run_ebpf_matcher --clear "" >/dev/null 2>&1 || true
+  fi
+  rm -f "${ebpf_cidr_out4}" "${ebpf_cidr_out6}" "${ebpf_cidr_pre4}" "${ebpf_cidr_pre6}" \
+        "${ebpf_force_out4}" "${ebpf_force_out6}" "${ebpf_app_out4}" "${ebpf_app_out6}" \
+        "${ebpf_map_runtime}" "${ebpf_map_cidr4}" "${ebpf_map_cidr6}" \
+        "${ebpf_map_force_uid}" "${ebpf_map_app_uid}" >/dev/null 2>&1 || true
+  rmdir "${ebpf_pin_dir}" >/dev/null 2>&1 || true
+}
+
 # 中国大陆 IP 集的载入与清理。
 setup_cn_ipset() {
   [ "${bypass_cn_ip}" = "true" ] || { log Debug "大陆IP分流未启用"; return 0; }
-  if ! command -v ipset >/dev/null 2>&1; then
+  if [ "${cap_ipset}" != "true" ]; then
     log Warning "ipset 不可用，跳过大陆IP分流"
     return 1
   fi
@@ -2251,7 +2782,7 @@ setup_cn_ipset() {
 cleanup_cn_ipset() {
   local cleanup_mode="${1:-keep}"
 
-  command -v ipset >/dev/null 2>&1 || return 0
+  [ "${cap_ipset}" = "true" ] || return 0
   case "${cleanup_mode}" in
     flush)
       ipset flush cnip 2>/dev/null || true
@@ -2290,8 +2821,8 @@ forward() {
   # 如需 NAT 出口，可在此补充 MASQUERADE。
 
   if [ "${action}" = "-D" ]; then
-    del_rule_if_exists filter FORWARD -i "${tun_device}" -j ACCEPT
-    del_rule_if_exists filter FORWARD -o "${tun_device}" -j ACCEPT
+    del_rule_silent filter FORWARD -i "${tun_device}" -j ACCEPT
+    del_rule_silent filter FORWARD -o "${tun_device}" -j ACCEPT
   else
     ensure_rule_insert filter FORWARD -i "${tun_device}" -j ACCEPT
     ensure_rule_insert filter FORWARD -o "${tun_device}" -j ACCEPT
@@ -2314,11 +2845,13 @@ start_tun_bypass() {
 
   ensure_rule_append mangle "${pre_chain}" -i "${tun_device}" -j RETURN
   append_tun_dns_rules "${pre_chain}"
+  append_force_proxy_destination_rules "${pre_chain}" route
   append_tun_bypass_destination_rules "${pre_chain}"
 
   append_tun_core_bypass_rules "${out_chain}"
   append_tun_dns_rules "${out_chain}"
   append_cnip_force_proxy_tun_rules "${out_chain}"
+  append_force_proxy_destination_rules "${out_chain}" route
   append_tun_proxy_mode_rules "${out_chain}"
   append_tun_bypass_destination_rules "${out_chain}"
 
@@ -2450,7 +2983,7 @@ cleanup_iptables_family() {
   esac
 
   if [ "${iptables}" = "$IP6V" ]; then
-    del_rule_if_exists filter OUTPUT -p udp --destination-port 53 -j DROP
+    del_rule_silent filter OUTPUT -p udp --destination-port 53 -j DROP
   fi
 }
 
@@ -2469,7 +3002,7 @@ cleanup_iptables() {
 }
 
 setup_cn_ipset_if_needed() {
-  if [ "${bypass_cn_ip}" = "true" ]; then
+  if [ "${bypass_cn_ip}" = "true" ] && cnip_uses_ipset; then
     setup_cn_ipset || log Warning "大陆IP分流初始化失败，已跳过"
   fi
 }
@@ -2579,6 +3112,8 @@ if [ "$1" = "disable" ]; then
   fi
 fi
 
+probe_capabilities
+
 if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
   case "$1" in
     enable|renew)
@@ -2586,6 +3121,7 @@ if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
       box_etc
       prepare_rule_apply
       setup_cn_ipset_if_needed
+      setup_rule_ebpf
 
       [ $1 = "renew" ] && log Warning "正在清理 iptables 透明代理规则。"
 
@@ -2594,13 +3130,13 @@ if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
           log Info "TPROXY: 正在创建透明代理规则。"
 
           iptables="$IPV"
-          apply_tproxy_family
+          begin_batch; apply_tproxy_family; end_batch
 
           if [ "${ipv6}" = "true" ]; then
             log Debug "启用 IPv6。"
             ipv6_enable
             iptables="$IP6V"
-            apply_tproxy_family
+            begin_batch; apply_tproxy_family; end_batch
           else
             disable_ipv6
             log Warning "已禁用 IPv6。"
@@ -2610,13 +3146,13 @@ if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
           log Info "Redirect: 正在创建透明代理规则。"
 
           iptables="$IPV"
-          apply_redirect_family
+          begin_batch; apply_redirect_family; end_batch
 
           if [ "${ipv6}" = "true" ]; then
             log Debug "启用 IPv6。"
             ipv6_enable
             iptables="$IP6V"
-            apply_redirect_family
+            begin_batch; apply_redirect_family; end_batch
           else
             disable_ipv6
             log Warning "已禁用 IPv6。"
@@ -2627,13 +3163,13 @@ if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
 
           iptables="$IPV"
           wait_tun_ready
-          apply_mixed_family
+          begin_batch; apply_mixed_family; end_batch
 
           if [ "${ipv6}" = "true" ]; then
             log Debug "启用 IPv6。"
             ipv6_enable
             iptables="$IP6V"
-            apply_mixed_family
+            begin_batch; apply_mixed_family; end_batch
           else
             disable_ipv6
             log Warning "已禁用 IPv6。"
@@ -2643,13 +3179,13 @@ if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
           log Info "Enhance: 正在创建透明代理规则。"
 
           iptables="$IPV"
-          apply_enhance_family
+          begin_batch; apply_enhance_family; end_batch
 
           if [ "${ipv6}" = "true" ]; then
             log Debug "启用 IPv6。"
             ipv6_enable
             iptables="$IP6V"
-            apply_enhance_family
+            begin_batch; apply_enhance_family; end_batch
           else
             disable_ipv6
             log Warning "已禁用 IPv6。"
@@ -2674,6 +3210,7 @@ if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then
       cleanup_iptables_for_mode "${cleanup_mode}"
 
       cleanup_cn_ipset_if_needed "${2:-keep}"
+      cleanup_rule_ebpf
 
       runtime_clear
 
@@ -2692,19 +3229,20 @@ else
 
       prepare_rule_apply
       setup_cn_ipset_if_needed
+      setup_rule_ebpf
       wait_tun_ready
       [ $1 = "renew" ] && log Warning "正在清理 TUN 规则。"
       iptables="$IPV"
 
       [ -n "${packages_list}" ] && log Debug "代理模式: $proxy_mode (${packages_list[*]})"
 
-      apply_tun_family
+      begin_batch; apply_tun_family; end_batch
 
       if [ "${ipv6}" = "true" ]; then
         log Debug "启用 IPv6。"
         ipv6_enable
         iptables="$IP6V"
-        apply_tun_family
+        begin_batch; apply_tun_family; end_batch
       else
         disable_ipv6
         log Warning "已禁用 IPv6。"
@@ -2723,6 +3261,7 @@ else
 
       cleanup_iptables_for_mode "${cleanup_mode}"
       cleanup_cn_ipset_if_needed "${2:-keep}"
+      cleanup_rule_ebpf
 
       runtime_clear
 

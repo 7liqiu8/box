@@ -22,16 +22,16 @@ get_wifi_iface() {
 
 # 获取当前 WiFi SSID
 get_current_ssid() {
+  local iface="$1"
+  local wifi_status="$2"
   local ssid
-  local iface
-  iface=$(get_wifi_iface)
-  
-  ssid=$(cmd wifi status 2>/dev/null | sed -n 's/.*SSID: "\([^"]*\)".*/\1/p' | head -n1)
-  
+
+  ssid=$(printf '%s\n' "$wifi_status" | sed -n 's/.*SSID: "\([^"]*\)".*/\1/p' | head -n1)
+
   if [ -z "$ssid" ] || [ "$ssid" = "<unknown ssid>" ]; then
     ssid=$(iwconfig "$iface" 2>/dev/null | busybox awk -F'ESSID:' '{print $2}' | tr -d '"' | busybox awk '{print $1}')
   fi
-  
+
   if [ -z "$ssid" ] || [ "$ssid" = "off/any" ]; then
     echo "unknown"
   else
@@ -41,11 +41,11 @@ get_current_ssid() {
 
 # 获取当前 WiFi BSSID
 get_current_bssid() {
+  local iface="$1"
+  local wifi_status="$2"
   local bssid
-  local iface
-  iface=$(get_wifi_iface)
 
-  bssid=$(cmd wifi status 2>/dev/null | sed -n 's/.*BSSID: \([0-9a-fA-F:][0-9a-fA-F:]*\).*/\1/p' | head -n1)
+  bssid=$(printf '%s\n' "$wifi_status" | sed -n 's/.*BSSID: \([0-9a-fA-F:][0-9a-fA-F:]*\).*/\1/p' | head -n1)
 
   if [ -z "$bssid" ] || [ "$bssid" = "<none>" ]; then
     bssid=$(iw dev "$iface" link 2>/dev/null | sed -n 's/^Connected to \([0-9a-fA-F:][0-9a-fA-F:]*\).*/\1/p' | head -n1)
@@ -64,10 +64,9 @@ get_current_bssid() {
 
 # 检查 WiFi 是否连接
 is_wifi_connected() {
-  local iface
-  iface=$(get_wifi_iface)
+  local iface="$1"
 
-  if ip addr show "$iface" 2>/dev/null | grep -Eq 'inet6? '; then
+  if ip addr show "$iface" 2>/dev/null | busybox awk '/inet / {f=1} /inet6 .*scope global/ {f=1} END{exit !f}'; then
     echo "wifi"
     return 0
   fi
@@ -77,8 +76,7 @@ is_wifi_connected() {
 
 # 获取 WiFi IP 地址
 get_wifi_ip() {
-  local iface
-  iface=$(get_wifi_iface)
+  local iface="$1"
 
   ip addr show "$iface" 2>/dev/null | busybox awk '/inet /{print $2}' | cut -d/ -f1 | head -n1
 }
