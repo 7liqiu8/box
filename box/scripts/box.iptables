@@ -23,8 +23,8 @@ proxy_tcp=${proxy_tcp:-"true"}
 proxy_udp=${proxy_udp:-"true"}
 dns_hijack_tcp=${dns_hijack_tcp:-"true"}
 dns_hijack_udp=${dns_hijack_udp:-"true"}
-tun_force_proxy_cidrs=(${tun_force_proxy_cidrs[@]})
-tun_force_proxy_cidrs6=(${tun_force_proxy_cidrs6[@]})
+force_proxy_cidrs=(${force_proxy_cidrs[@]})
+force_proxy_cidrs6=(${force_proxy_cidrs6[@]})
 fake_ip_range=""
 fake_ip6_range=""
 stack="${stack:-gvisor}"
@@ -281,8 +281,8 @@ runtime_save() {
     printf 'bypass_cn_ip="%s"\n' "${bypass_cn_ip}"
     printf 'bypass_cn_ip_v4="%s"\n' "${bypass_cn_ip_v4}"
     printf 'bypass_cn_ip_v6="%s"\n' "${bypass_cn_ip_v6}"
-    printf 'tun_force_proxy_cidrs=(%s)\n' "${tun_force_proxy_cidrs[*]}"
-    printf 'tun_force_proxy_cidrs6=(%s)\n' "${tun_force_proxy_cidrs6[*]}"
+    printf 'force_proxy_cidrs=(%s)\n' "${force_proxy_cidrs[*]}"
+    printf 'force_proxy_cidrs6=(%s)\n' "${force_proxy_cidrs6[*]}"
     printf 'box_user="%s"\n' "${box_user}"
     printf 'box_group="%s"\n' "${box_group}"
   } >"${runtime_iptables_env}" 2>/dev/null
@@ -1057,20 +1057,74 @@ append_tun_fake_ip_route_rules() {
   ensure_rule_append mangle "${chain_name}" -d "${fake_range}" -j RETURN
 }
 
-append_tun_force_proxy_destination_rules() {
+append_force_proxy_destination_rule() {
   local chain_name="$1"
+  local action="$2"
+  shift 2
+
+  case "${action}" in
+    route)
+      append_mark_and_return_rule mangle "${chain_name}" "${tun_route_mark}" "$@"
+      ;;
+    redirect)
+      [ "${proxy_tcp}" = "true" ] && append_redirect_dispatch_rule "${chain_name}" -p tcp "$@"
+      ;;
+    tproxy)
+      [ "${network_mode}" != "enhance" ] && [ "${proxy_tcp}" = "true" ] && append_tproxy_dispatch_rule "${chain_name}" -p tcp "$@"
+      [ "${proxy_udp}" = "true" ] && append_tproxy_dispatch_rule "${chain_name}" -p udp "$@"
+      ;;
+  esac
+}
+
+append_force_proxy_destination_rules() {
+  local chain_name="$1"
+  local action="$2"
 
   if [ "${iptables}" = "$IPV" ]; then
-    for subnet in ${tun_force_proxy_cidrs[@]} ; do
+    for subnet in ${force_proxy_cidrs[@]} ; do
       [ -n "${subnet}" ] || continue
-      append_mark_and_return_rule mangle "${chain_name}" "${tun_route_mark}" -d "${subnet}"
+      append_force_proxy_destination_rule "${chain_name}" "${action}" -d "${subnet}"
     done
   else
-    for subnet6 in ${tun_force_proxy_cidrs6[@]} ; do
+    for subnet6 in ${force_proxy_cidrs6[@]} ; do
       [ -n "${subnet6}" ] || continue
-      append_mark_and_return_rule mangle "${chain_name}" "${tun_route_mark}" -d "${subnet6}"
+      append_force_proxy_destination_rule "${chain_name}" "${action}" -d "${subnet6}"
     done
   fi
+}
+
+append_mark_force_proxy_destination_rule() {
+  local table_name="$1"
+  local chain_name="$2"
+  shift 2
+
+  [ "${network_mode}" != "enhance" ] && [ "${proxy_tcp}" = "true" ] && append_mark_and_return_rule "${table_name}" "${chain_name}" "${fwmark}" -p tcp "$@"
+  [ "${proxy_udp}" = "true" ] && append_mark_and_return_rule "${table_name}" "${chain_name}" "${fwmark}" -p udp "$@"
+}
+
+append_mark_force_proxy_destination_rules() {
+  local table_name="$1"
+  local chain_name="$2"
+
+  if [ "${iptables}" = "$IPV" ]; then
+    for subnet in ${force_proxy_cidrs[@]} ; do
+      [ -n "${subnet}" ] || continue
+      append_mark_force_proxy_destination_rule "${table_name}" "${chain_name}" -d "${subnet}"
+    done
+  else
+    for subnet6 in ${force_proxy_cidrs6[@]} ; do
+      [ -n "${subnet6}" ] || continue
+      append_mark_force_proxy_destination_rule "${table_name}" "${chain_name}" -d "${subnet6}"
+    done
+  fi
+}
+
+append_redirect_force_proxy_destination_rules() {
+  append_force_proxy_destination_rules "$1" redirect
+}
+
+append_tproxy_force_proxy_destination_rules() {
+  append_force_proxy_destination_rules "$1" tproxy
 }
 
 append_tun_bypass_destination_rules() {
@@ -1560,6 +1614,7 @@ setup_redirect_perf_external_chain() {
   setup_perf_dest_chain nat "${ip_chain}"
   setup_perf_pre_if_chain nat "${if_chain}"
 
+  append_redirect_force_proxy_destination_rules BOX_EXTERNAL
   add_perf_chain_jumps nat BOX_EXTERNAL "${ip_chain}" "${if_chain}"
 
   if [ "${proxy_tcp}" = "true" ]; then
@@ -1584,6 +1639,7 @@ setup_redirect_perf_local_chain() {
   setup_perf_dest_chain nat "${ip_chain}"
   setup_perf_out_app_chain nat "${app_chain}"
 
+  append_redirect_force_proxy_destination_rules BOX_LOCAL
   add_perf_chain_jumps nat BOX_LOCAL "${app_chain}" "${ip_chain}"
 
   if [ "${proxy_tcp}" = "true" ]; then
@@ -1619,6 +1675,7 @@ setup_tproxy_perf_external_chain() {
   apply_mangle_dns_rules BOX_EXTERNAL tproxy
   apply_tproxy_ipv6_fakeip_rules BOX_EXTERNAL tproxy
 
+  append_tproxy_force_proxy_destination_rules BOX_EXTERNAL
   add_perf_chain_jumps mangle BOX_EXTERNAL "${ip_chain}" "${if_chain}"
 
   append_tproxy_perf_connmark_rules BOX_EXTERNAL
@@ -1647,6 +1704,7 @@ setup_tproxy_perf_local_chain() {
   apply_tproxy_ipv6_fakeip_rules BOX_LOCAL mark
   append_cnip_force_proxy_local_rules mangle BOX_LOCAL mark
 
+  append_mark_force_proxy_destination_rules mangle BOX_LOCAL
   add_perf_chain_jumps mangle BOX_LOCAL "${ip_chain}" "${app_chain}"
   apply_mangle_dns_rules BOX_LOCAL mark
 
@@ -1672,6 +1730,7 @@ setup_tproxy_external_chain() {
   apply_tproxy_reply_bypass_rules BOX_EXTERNAL
   apply_mangle_dns_rules BOX_EXTERNAL tproxy
   apply_tproxy_ipv6_fakeip_rules BOX_EXTERNAL tproxy
+  append_tproxy_force_proxy_destination_rules BOX_EXTERNAL
   append_common_bypass_rules mangle BOX_EXTERNAL
   apply_ignored_external_interfaces mangle BOX_EXTERNAL
   apply_external_loopback_rule mangle BOX_EXTERNAL tproxy
@@ -1690,6 +1749,7 @@ setup_tproxy_local_chain() {
   apply_mangle_dns_rules BOX_LOCAL mark
   apply_tproxy_ipv6_fakeip_rules BOX_LOCAL mark
   append_cnip_force_proxy_local_rules mangle BOX_LOCAL mark
+  append_mark_force_proxy_destination_rules mangle BOX_LOCAL
   append_common_bypass_rules mangle BOX_LOCAL
   apply_local_proxy_rules mangle BOX_LOCAL mark
   finish_local_chain mangle BOX_LOCAL
@@ -1778,6 +1838,7 @@ setup_redirect_local_chain() {
   setup_local_chain_common nat BOX_LOCAL
   apply_redirect_reply_bypass_rules BOX_LOCAL
   append_cnip_force_proxy_local_rules nat BOX_LOCAL redirect
+  append_redirect_force_proxy_destination_rules BOX_LOCAL
   append_common_bypass_rules nat BOX_LOCAL
   apply_redirect_connmark_restore_rules BOX_LOCAL
   apply_local_proxy_rules nat BOX_LOCAL redirect
@@ -1794,6 +1855,7 @@ setup_redirect_external_chain() {
   setup_external_chain_common nat BOX_EXTERNAL
   apply_redirect_reply_bypass_rules BOX_EXTERNAL
   ensure_dns_nat_hijack
+  append_redirect_force_proxy_destination_rules BOX_EXTERNAL
   append_common_bypass_rules nat BOX_EXTERNAL
   apply_ignored_external_interfaces nat BOX_EXTERNAL
   apply_redirect_connmark_restore_rules BOX_EXTERNAL
@@ -2334,13 +2396,13 @@ start_tun_bypass() {
 
   ensure_rule_append mangle "${pre_chain}" -i "${tun_device}" -j RETURN
   append_tun_dns_rules "${pre_chain}"
-  append_tun_force_proxy_destination_rules "${pre_chain}"
+  append_force_proxy_destination_rules "${pre_chain}" route
   append_tun_bypass_destination_rules "${pre_chain}"
 
   append_tun_core_bypass_rules "${out_chain}"
   append_tun_dns_rules "${out_chain}"
   append_cnip_force_proxy_tun_rules "${out_chain}"
-  append_tun_force_proxy_destination_rules "${out_chain}"
+  append_force_proxy_destination_rules "${out_chain}" route
   append_tun_proxy_mode_rules "${out_chain}"
   append_tun_bypass_destination_rules "${out_chain}"
 
