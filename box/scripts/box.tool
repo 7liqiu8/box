@@ -71,21 +71,13 @@ upfile() {
   log Debug "使用 User-Agent: ${current_ua}"
 
   if which curl >/dev/null; then
-    local time_cond=""
-    [ -f "${file_bak}" ] && time_cond="-z ${file_bak}"
-    http_code=$(curl -L -s --insecure --http1.1 --compressed ${time_cond} --user-agent "${current_ua}" -o "${file}" -w "%{http_code}" "${update_url}")
+    http_code=$(curl -L -s --insecure --http1.1 --compressed --user-agent "${current_ua}" -o "${file}" -w "%{http_code}" "${update_url}")
     curl_exit_code=$?
 
     if [ ${curl_exit_code} -ne 0 ]; then
       log Error "使用 curl 下载失败 (退出码: ${curl_exit_code})"
       [ -f "${file_bak}" ] && mv "${file_bak}" "${file}"
       return 1
-    fi
-
-    if [ "${http_code}" = "304" ]; then
-      log Info "下载跳过: 远端未更新 (HTTP 304)，复用本地文件"
-      [ -f "${file_bak}" ] && mv "${file_bak}" "${file}"
-      return 0
     fi
 
     if [ "${http_code}" -ne 200 ]; then
@@ -1336,91 +1328,6 @@ cgroup_memcg() {
   fi
 }
 
-cgroup_cpuset() {
-  local pid_file="${1}"
-  local cores="${2}"
-
-  if [ -z "${pid_file}" ] || [ ! -f "${pid_file}" ]; then
-    log Warning "PID 文件丢失或无效: ${pid_file}"
-    return 1
-  fi
-
-  local PID
-  PID=$(<"${pid_file}" 2>/dev/null)
-  if [ -z "$PID" ] || ! kill -0 "$PID" >/dev/null; then
-    log Warning "来自 ${pid_file} 的 PID $PID 无效或未运行"
-    return 1
-  fi
-
-  if [ -z "${cores}" ]; then
-    local total_core
-    total_core=$(nproc --all 2>/dev/null)
-    if [ -z "$total_core" ] || [ "$total_core" -le 0 ]; then
-      log Warning "检测 CPU 核心失败"
-      return 1
-    fi
-    cores="0-$((total_core - 1))"
-  fi
-
-  if [ -z "${cpuset_path}" ]; then
-    cpuset_path=$(mount | grep cgroup | busybox awk '/cpuset/{print $3}' | head -1)
-    if [ -z "${cpuset_path}" ] || [ ! -d "${cpuset_path}" ]; then
-      log Warning "cpuset_path 未找到"
-      return 1
-    fi
-  fi
-
-  local cpuset_target="${cpuset_path}/box"
-  
-  if [ ! -d "${cpuset_target}" ]; then
-    mkdir -p "${cpuset_target}" 2>/dev/null
-    if [ ! -d "${cpuset_target}" ]; then
-      log Warning "无法创建 box cpuset 目录: ${cpuset_target}"
-      cpuset_target="${cpuset_path}/foreground"
-      if [ ! -d "${cpuset_target}" ]; then
-        cpuset_target="${cpuset_path}/top-app"
-      fi
-      if [ ! -d "${cpuset_target}" ]; then
-        cpuset_target="${cpuset_path}/apps"
-        if [ ! -d "${cpuset_target}" ]; then
-          log Warning "cpuset 目标未找到，无法设置 CPU 核心"
-          return 1
-        fi
-      fi
-      log Info "回退使用现有 cpuset 目录: ${cpuset_target}"
-    else
-      log Info "成功创建专用 box cpuset 目录: ${cpuset_target}"
-      if [ -f "${cpuset_path}/cpus" ]; then
-        cat "${cpuset_path}/cpus" > "${cpuset_target}/cpus" 2>/dev/null
-      fi
-      if [ -f "${cpuset_path}/mems" ]; then
-        cat "${cpuset_path}/mems" > "${cpuset_target}/mems" 2>/dev/null
-      fi
-    fi
-  fi
-
-  echo "${cores}" > "${cpuset_target}/cpus" 2>/dev/null
-  if [ $? -ne 0 ]; then
-    log Warning "无法设置 CPU 核心到 ${cpuset_target}/cpus"
-    return 1
-  fi
-  
-  echo "0" > "${cpuset_target}/mems" 2>/dev/null
-  if [ $? -ne 0 ]; then
-    log Warning "无法设置内存节点到 ${cpuset_target}/mems"
-    return 1
-  fi
-
-  echo "${PID}" > "${cpuset_target}/cgroup.procs" 2>/dev/null
-  if [ $? -eq 0 ]; then
-    log Info "已分配 PID $PID 到 ${cpuset_target}，CPU 核心 [$cores]"
-    return 0
-  else
-    log Warning "无法将 PID $PID 分配到 ${cpuset_target}"
-    return 1
-  fi
-}
-
 webroot() {
   ip_port=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/external-controller:/ {print $2}' "${mihomo_config}"; else busybox awk -F'[:,]' '/"external_controller"/ {print $2":"$3}' "${sing_config}" | sed 's/^[ \t]*//;s/"//g'; fi;)
   secret=$(if [ "${bin_name}" = "mihomo" ]; then busybox awk '/^secret:/ {print $2}' "${mihomo_config}" | sed 's/"//g'; else busybox awk -F'"' '/"secret"/ {print $4}' "${sing_config}" | head -n 1; fi;)
@@ -1495,15 +1402,11 @@ case "$1" in
   check)
     check
     ;;
-  memcg|cpuset|blkio)
+  memcg|blkio)
     case "$1" in
       memcg)
         memcg_path=""
         cgroup_memcg "${box_pid}" ${memcg_limit}
-        ;;
-      cpuset)
-        cpuset_path=""
-        cgroup_cpuset "${box_pid}" ${allow_cpu}
         ;;
       blkio)
         blkio_path=""
@@ -1568,7 +1471,7 @@ case "$1" in
     ;;
   *)
     log Error "$0 $1 未找到"
-    log Info "用法: $0 {check|memcg|cpuset|blkio|geosub|geox|subs|upkernel [name]|upkernels [name...]|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|bond0|bond1|all}"
+    log Info "用法: $0 {check|memcg|blkio|geosub|geox|subs|upkernel [name]|upkernels [name...]|upgeox_all|upxui|upyq|upcurl|upcnip|reload|webroot|bond0|bond1|all}"
     log Info "upkernel 支持的核心: sing-box, mihomo, mihomo_smart, xray, v2fly, hysteria"
     ;;
 esac

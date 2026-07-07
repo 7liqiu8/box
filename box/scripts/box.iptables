@@ -2653,7 +2653,6 @@ write_rule_ebpf_config() {
   cat > "${ebpf_rule_config}" <<EOF
 {
   "ipv6": ${ipv6_json},
-  "cidrHitIsMatch": true,
   "cidr4": "${cidr4}",
   "cidr6": "${cidr6}",
   "forceUids": "${force_uids}",
@@ -2666,7 +2665,6 @@ write_rule_ebpf_config() {
   "pinForceOut6": "${ebpf_force_out6}",
   "pinAppOut4": "${ebpf_app_out4}",
   "pinAppOut6": "${ebpf_app_out6}",
-  "mapRuntime": "${ebpf_map_runtime}",
   "mapCidr4": "${ebpf_map_cidr4}",
   "mapCidr6": "${ebpf_map_cidr6}",
   "mapForceUid": "${ebpf_map_force_uid}",

@@ -936,6 +936,80 @@ prepare_mihomo() {
   fi
 }
 
+taskset_binary() {
+  for path in /system/bin/taskset /vendor/bin/taskset /system/xbin/taskset /bin/taskset /usr/bin/taskset; do
+    [ -x "${path}" ] && { printf '%s\n' "${path}"; return 0; }
+  done
+  command -v taskset 2>/dev/null
+}
+
+taskset_mask() {
+  local cores="${1}"
+  local total_core item start end cpu mask bit any
+  mask=0
+  any=0
+
+  if [ -z "${cores}" ]; then
+    total_core="$(nproc --all 2>/dev/null)"
+    [ -z "${total_core}" ] && total_core="$(busybox nproc --all 2>/dev/null)"
+    if [ -z "${total_core}" ] || [ "${total_core}" -le 0 ]; then
+      return 1
+    fi
+    cores="0-$((total_core - 1))"
+  fi
+
+  for item in $(echo "${cores}" | busybox tr ',' ' '); do
+    item="$(echo "${item}" | busybox tr -d '[:space:]')"
+    [ -z "${item}" ] && continue
+
+    case "${item}" in
+      *-*)
+        start="${item%-*}"
+        end="${item#*-}"
+        ;;
+      *)
+        start="${item}"
+        end="${item}"
+        ;;
+    esac
+
+    case "${start}" in ''|*[!0-9]*) return 1 ;; esac
+    case "${end}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${start}" -gt "${end}" ] && return 1
+
+    cpu="${start}"
+    while [ "${cpu}" -le "${end}" ]; do
+      [ "${cpu}" -ge 63 ] && return 1
+      bit=$((1 << cpu))
+      mask=$((mask | bit))
+      any=1
+      cpu=$((cpu + 1))
+    done
+  done
+
+  [ "${any}" -eq 1 ] || return 1
+  printf '%x\n' "${mask}"
+}
+
+start_core_bin() {
+  local taskset_bin taskset_mask_arg
+
+  if [ "${taskset_cpu}" = "true" ]; then
+    taskset_bin="$(taskset_binary)"
+    taskset_mask_arg="$(taskset_mask "${allow_cpu}")"
+    if [ -n "${taskset_bin}" ] && [ -n "${taskset_mask_arg}" ]; then
+      log Info "使用 taskset 分配 CPU 核心 [${allow_cpu:-auto}]，mask=${taskset_mask_arg}"
+      nohup "${taskset_bin}" "${taskset_mask_arg}" busybox setuidgid "${box_user_group}" "${bin_path}" "$@" > "${bin_log}" 2>&1 &
+      PID=$!
+      return 0
+    fi
+    log Warning "taskset 启用失败，改为直接启动核心"
+  fi
+
+  nohup busybox setuidgid "${box_user_group}" "${bin_path}" "$@" > "${bin_log}" 2>&1 &
+  PID=$!
+}
+
 box_run_bin() {
   log Info "启动服务: ${bin_name}"
   ulimit -SHn 1000000
@@ -960,8 +1034,7 @@ box_run_bin() {
           force_network_mode "tproxy" "${bin_name} 不支持网络模式: ${network_mode}，已切换到 TPROXY"
           ;;
       esac
-      nohup busybox setuidgid "${box_user_group}" "${bin_path}" -c "${hysteria_config}" > "${bin_log}" 2>&1 &
-      PID=$!
+      start_core_bin -c "${hysteria_config}"
       if kill -0 "${PID}" 2>/dev/null; then
         echo -n "${PID}" > "${box_pid}"
       else
@@ -976,8 +1049,7 @@ box_run_bin() {
         prepare_singbox
       fi
       if ${bin_path} check -c "${sing_config}" -D "${box_dir}/${bin_name}" > "${box_run}/${bin_name}.log" 2>&1; then
-        nohup busybox setuidgid "${box_user_group}" "${bin_path}" run -c "${sing_config}" -D "${box_dir}/${bin_name}" > "${bin_log}" 2>&1 &
-        PID=$!
+        start_core_bin run -c "${sing_config}" -D "${box_dir}/${bin_name}"
         echo -n $PID > "${box_pid}"
       else
         set_description error
@@ -991,8 +1063,7 @@ box_run_bin() {
         prepare_mihomo
       fi
       if ${bin_path} -t -d "${box_dir}/${bin_name}" -f "${mihomo_config}" > "${box_run}/${bin_name}.log" 2>&1; then
-        nohup busybox setuidgid "${box_user_group}" "${bin_path}" -d "${box_dir}/${bin_name}" -f "${mihomo_config}" > "${bin_log}" 2>&1 &
-        PID=$!
+        start_core_bin -d "${box_dir}/${bin_name}" -f "${mihomo_config}"
         echo -n $PID > "${box_pid}"
       else
         set_description error
@@ -1017,8 +1088,7 @@ box_run_bin() {
       fi
       export XRAY_LOCATION_ASSET="${box_dir}/${bin_name}"
       if ${bin_path} -test -confdir "${box_dir}/${bin_name}" > "${box_run}/${bin_name}.log" 2>&1; then
-        nohup busybox setuidgid "${box_user_group}" "${bin_path}" run -confdir "${box_dir}/${bin_name}" > "${bin_log}" 2>&1 &
-        PID=$!
+        start_core_bin run -confdir "${box_dir}/${bin_name}"
         echo -n $PID > "${box_pid}"
       else
         set_description error
@@ -1043,8 +1113,7 @@ box_run_bin() {
       fi
       export V2RAY_LOCATION_ASSET="${box_dir}/${bin_name}"
       if ${bin_path} test -d "${box_dir}/${bin_name}" > "${box_run}/${bin_name}.log" 2>&1; then
-        nohup busybox setuidgid "${box_user_group}" "${bin_path}" run -d "${box_dir}/${bin_name}" > "${bin_log}" 2>&1 &
-        PID=$!
+        start_core_bin run -d "${box_dir}/${bin_name}"
         echo -n $PID > "${box_pid}"
       else
         set_description error
@@ -1076,7 +1145,6 @@ box_cgroup() {
     fi
   }
   set_cgroup_config "memcg" "${cgroup_memcg}"
-  set_cgroup_config "cpuset" "${cgroup_cpuset}"
   set_cgroup_config "blkio" "${cgroup_blkio}"
 }
 
