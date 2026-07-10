@@ -1,3 +1,11 @@
+#### Changelog 1.2.8-g - 10-07-2026
+- Create config-wifi.ymal (ab06395)
+- Add config-cellular.yaml with initial settings (68a3ece)
+- Update README.md (e65e2e8)
+- Update customize.sh (6cc5552)
+- Create switch_mihomo_profile.sh (6467fed)
+- Update net.inotify (c9a1bb4)
+
 #### Changelog 1.2.8 - 13-06-2026
 - fix(log): 统一脚本日志输出 (dfa2661)
 - fix(net): 修复 TUN 模式下黑白名单与 fake-ip 连接异常 (ec78ef8)
