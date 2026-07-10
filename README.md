@@ -1,5 +1,10 @@
 # Box for Root
 
+在作者原基础上添加了wifi和数据自动切换配置
+- WiFi配置文件 config-wifi.yaml
+- 数据配置文件 config-cellular.yaml
+
+
 `Box for Root` 是一个面向 Android Root 环境（Magisk / KernelSU / APatch）的透明代理工具箱模块。
 
 项目深受以下仓库启发并在其基础上持续演进：
