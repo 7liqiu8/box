@@ -297,6 +297,11 @@ if [ "${backup_box}" = "true" ]; then
   for dir in mihomo xray v2fly sing-box hysteria; do
     restore_config_dir "$dir"
   done
+    if [ -f "${temp_dir}/scripts/switch_mihomo_profile.sh" ] && [ ! -f "/data/adb/box/scripts/switch_mihomo_profile.sh" ]; then
+    ui_print "  - 恢复 switch_mihomo_profile.sh"
+    cp -f "${temp_dir}/scripts/switch_mihomo_profile.sh" "/data/adb/box/scripts/switch_mihomo_profile.sh"
+    chmod 755 "/data/adb/box/scripts/switch_mihomo_profile.sh"
+  fi
 
   ui_print "  - 恢复根目录配置文件"
   for conf_file in ap.list.cfg package.list.cfg gid.list.cfg crontab.cfg; do
@@ -337,6 +342,20 @@ else
   sed -i "s/name=.*/name=Box for Magisk/g" $MODPATH/module.prop
 fi
 unzip -o "$ZIPFILE" 'webroot/*' -d "$MODPATH" >&2
+
+if [ ! -f /data/adb/box/mihomo/config-wifi.yaml ] && [ -f /data/adb/box/mihomo/config.yaml ]; then
+  ui_print "- 未检测到 config-wifi.yaml，使用当前 config.yaml 生成"
+  cp -f /data/adb/box/mihomo/config.yaml /data/adb/box/mihomo/config-wifi.yaml
+fi
+
+if [ ! -f /data/adb/box/mihomo/config-cellular.yaml ] && [ -f /data/adb/box/mihomo/config.yaml ]; then
+  ui_print "- 未检测到 config-cellular.yaml，使用当前 config.yaml 生成"
+  cp -f /data/adb/box/mihomo/config.yaml /data/adb/box/mihomo/config-cellular.yaml
+fi
+
+if [ -f /data/adb/box/scripts/switch_mihomo_profile.sh ]; then
+  chmod 755 /data/adb/box/scripts/switch_mihomo_profile.sh
+fi
 
 ui_print "- 清理残留文件"
 rm -rf /data/adb/box/bin/.bin $MODPATH/box $MODPATH/box_service.sh
