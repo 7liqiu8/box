@@ -354,4 +354,5 @@ if [ "${events}" = "w" ]; then
     net_log_info "未检测到运行中的核心进程，跳过防回环规则更新"
   fi
   apply_network_control_policy
+  "${SCRIPTS_DIR}/switch_mihomo_profile.sh"
 fi
