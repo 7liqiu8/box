@@ -1,0 +1,251 @@
+mixed-port: 7890
+redir-port: 9797
+tproxy-port: 9898
+timeout: 15000
+keep-alive-interval: 30
+mode: Rule
+bind-address: '*'
+ipv6: true
+allow-lan: true
+unified-delay: false
+tcp-concurrent: true
+log-level: error
+find-process-mode: always
+external-controller: 0.0.0.0:9090
+external-ui: ./dashboard
+
+STUN: &STUN
+  type: http
+  interval: 100
+  health-check:
+    enable: true
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+  proxy: 订阅节点前置代理
+  header:
+    User-Agent:
+      - "clash-verge/v2.2.3"
+      - "ClashMetaForAndroid/2.11.2.Meta"
+      - "ClashforWindows/0.19.23"
+      - "clash.meta"
+      - "mihomo"
+
+p: &p
+  type: http
+  interval: 86400
+  health-check:
+    enable: true
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+  proxy: 订阅节点前置代理
+  header:
+    User-Agent:
+      - "clash-verge/v2.2.3"
+      - "ClashMetaForAndroid/2.11.2.Meta"
+      - "ClashforWindows/0.19.23"
+      - "clash.meta"
+      - "mihomo"
+
+proxy-providers:
+  1.主要STUN:
+    <<: *STUN
+    override:
+      additional-prefix: "STUN1："
+    path: ./proxies/1.主要STUN.yaml
+    url: "此处引入您的Clash订阅链接地址"
+
+  2.备用STUN:
+    <<: *STUN
+    override:
+      additional-prefix: "STUN2："
+    path: ./proxies/2.备用STUN.yaml
+    url: "此处引入您的Clash订阅链接地址"
+
+  3.额外STUN:
+    <<: *STUN
+    override:
+      additional-prefix: "STUN3："
+    path: ./proxies/3.额外STUN.yaml
+    url: "此处引入您的Clash订阅链接地址"
+
+  4.附加STUN:
+    <<: *STUN
+    override:
+      additional-prefix: "STUN4："
+    path: ./proxies/4.附加STUN.yaml
+    url: "此处引入您的Clash订阅链接地址"
+
+  1.主要地址:
+    <<: *p
+    override:
+      additional-prefix: "Main："
+    path: ./proxies/1.主要地址.yaml
+    url: "此处引入您的Clash订阅链接地址"
+
+  2.备用地址:
+    <<: *p
+    override:
+      additional-prefix: "Minor："
+    path: ./proxies/2.备用地址.yaml
+    url: "此处引入您的Clash订阅链接地址"
+
+  3.额外地址:
+    <<: *p
+    override:
+      additional-prefix: "Additi："
+    path: ./proxies/3.额外地址.yaml
+    url: "此处引入您的Clash订阅链接地址"
+
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+sniffer:
+  enable: true
+  override-destination: false
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+
+tun:
+  enable: true
+  device: meta
+  stack: gvisor
+  dns-hijack: [any:53, tcp://any:53]
+  udp-timeout: 300
+  auto-route: true
+  auto-redirect: false
+  auto-detect-interface: true
+  strict-route: true
+
+dns:
+  enable: true
+  ipv6: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.0/16
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "*.home.arpa"
+    - "+.stun.*"
+    - "+.stun.*.*"
+    - "+.stun*.*"
+    - "+.stun.*.*.*"
+    - "+.time.*"
+    - "+.ntp.*"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "+.market.xiaomi.com"
+    - "+.srv.nintendo.net"
+    - "+.xboxlive.com"
+    - "+.battlenet.com.cn"
+    - "+.battlenet.com"
+    - "+.blzstatic.cn"
+    - "+.battle.net"
+    - "+.wotgame.cn"
+    - "+.wggames.cn"
+    - "+.wowsgame.cn"
+    - "+.wargaming.net"
+    - "+.steamcontent.com"
+    - "+.steamserver.net"
+    - "+.steam-chat.com"
+    - "+.steamgames.com"
+    - "+.steampowered.com"
+    - "+.steamstatic.com"
+    - "+.steamcommunity.com"
+    - "+.steam-api.com"
+    - "+.steamusercontent.com"
+
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+
+  direct-nameserver:
+    - 119.29.29.29
+    - 223.5.5.5
+    - 202.100.192.68
+    - 202.100.199.8
+
+  proxy-server-nameserver:
+    - 202.100.192.68#流量直连
+    - 202.100.199.8#流量直连
+    - https://223.5.5.5/dns-query#流量直连
+    - https://223.6.6.6/dns-query#流量直连
+
+  nameserver:
+    - https://223.5.5.5/dns-query#流量直连
+    - https://1.12.12.12/dns-query#流量直连
+
+  fallback:
+    - https://1.1.1.1/dns-query#停机出口
+    - https://8.8.8.8/dns-query#停机出口
+
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 240.0.0.0/4
+      - 0.0.0.0/32
+
+proxies:
+  - {name: 流量直连, type: direct, udp: true}
+  - {name: 拒绝连接, type: reject}
+  - {name: DNS_Hijack, type: dns}
+
+  - {"name":"自建节点_1","type":"vmess","server":"此次填入你的域名/ip","port":"此次填入你的端口","uuid":"此次填入你的UUID","ws-opts":{"path":"/","headers":{"host":"a.189.cn"}},"alterId":"0","cipher":"auto","network":"ws"}
+  - {"name":"自建节点_2","type":"vmess","server":"此次填入你的域名/ip","port":"此次填入你的端口","uuid":"此次填入你的UUID","ws-opts":{"path":"/","headers":{"host":"a.189.cn"}},"alterId":"0","cipher":"auto","network":"ws"}
+  - {"name":"自建节点_3","type":"vmess","server":"此次填入你的域名/ip","port":"此次填入你的端口","uuid":"此次填入你的UUID","ws-opts":{"path":"/","headers":{"host":"a.189.cn"}},"alterId":"0","cipher":"auto","network":"ws"}
+  - {"name":"自建节点_4","type":"vmess","server":"此次填入你的域名/ip","port":"此次填入你的端口","uuid":"此次填入你的UUID","ws-opts":{"path":"/","headers":{"host":"a.189.cn"}},"alterId":"0","cipher":"auto","network":"ws","udp":true,"tls":true,"skip-cert-verify":true,"servername":"a.189.cn"}
+  - {"name":"自建节点_5","type":"vmess","server":"此次填入你的域名/ip","port":"此次填入你的端口","uuid":"此次填入你的UUID","ws-opts":{"path":"/","headers":{"host":"a.189.cn"}},"alterId":"0","cipher":"auto","network":"ws","udp":true,"tls":true,"skip-cert-verify":true,"servername":"a.189.cn"}
+
+proxy-groups:
+  - {name: 停机出口, type: select, proxies: [STUN_指定, 机场_指定, 负载均衡, 流量直连], use: [1.主要STUN, 2.备用STUN, 3.额外STUN, 4.附加STUN]}
+
+  - {name: UDP规则, type: select, proxies: [STUN_指定, 机场_指定, 流量直连], use: [1.主要STUN, 2.备用STUN, 3.额外STUN, 4.附加STUN]}
+
+  - {name: 订阅节点前置代理, type: select, proxies: [自建节点_故转, 流量直连]}
+
+  - {name: STUN_指定, type: select, use: [1.主要STUN, 2.备用STUN, 3.额外STUN, 4.附加STUN]}
+
+  - {name: 机场_指定, type: select, filter: "^(?!.*(套餐|重置|剩余|到期|订阅|群|账户|流量|有效期|时间|官网|失联|余额)).*$", use: [1.主要地址, 2.备用地址, 3.额外地址]}
+
+  - {name: 自建节点_故转默认, type: select, proxies: [自建节点_1, 自建节点_2, 自建节点_3, 自建节点_4, 自建节点_5]}
+
+  - {name: 负载均衡, type: load-balance, url: "https://www.gstatic.com/generate_204", interval: 300, strategy: consistent-hashing, use: [1.主要STUN, 3.额外STUN]}
+
+  - {name: 自建节点_自动, type: url-test, url: "https://www.gstatic.com/generate_204", interval: 300, lazy: false, timeout: 3000, max-failed-times: 3, expected-status: 204, tolerance: 100, hidden: true, proxies: [自建节点_1, 自建节点_2, 自建节点_3, 自建节点_4]}
+
+  - {name: 自建节点_故转, type: fallback, url: "https://www.gstatic.com/generate_204", interval: 100, lazy: false, hidden: true, max-failed-times: 3, timeout: 4000, proxies: [自建节点_故转默认, 自建节点_自动, 流量直连]}
+
+  - {name: 回家自建故转, type: fallback, url: "https://www.gstatic.com/generate_204", interval: 100, lazy: false, hidden: true, max-failed-times: 3, timeout: 4000, proxies: [自建节点_4, 自建节点_5, 流量直连]}
+
+  - {name: 回家出口, type: select, proxies: [负载均衡, 回家自建故转, 流量直连]}
+
+
+rule-providers:
+  Private_IP:
+    type: http
+    behavior: ipcidr
+    format: mrs
+    interval: 86400
+    path: ./rules/Private_IP.mrs
+    url: "https://cdn.jsdelivr.net/gh/GitMetaio/rule@master/rule/Clash/Lan/Lan_OCD_IP.mrs"
+    proxy: 流量直连
+
+rules:
+  - IP-CIDR,10.10.10.0/24,回家出口,no-resolve
+  - IP-CIDR,127.0.0.0/8,流量直连,no-resolve
+  - IP-CIDR,192.168.0.0/16,流量直连,no-resolve
+  - IP-CIDR,172.16.0.0/12,流量直连,no-resolve
+  - IP-CIDR,169.254.0.0/16,流量直连,no-resolve
+  - DOMAIN-SUFFIX,lan,流量直连
+  - DOMAIN-SUFFIX,local,流量直连
+  - DOMAIN-SUFFIX,home.arpa,流量直连
+  - NETWORK,UDP,UDP规则
+  - MATCH,停机出口
