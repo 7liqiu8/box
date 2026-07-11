@@ -83,12 +83,19 @@ restart_box() {
 main() {
   mkdir -p "${STATE_DIR}" >/dev/null 2>&1 || true
 
-  if [ -f "${LOCK_FILE}" ]; then
-    log "skip: lock exists"
+if [ -f "${LOCK_FILE}" ]; then
+  old_pid="$(cat "${LOCK_FILE}" 2>/dev/null)"
+  if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
+    log "skip: lock exists, pid=${old_pid}"
     exit 0
   fi
-  echo $$ > "${LOCK_FILE}"
-  trap 'rm -f "${LOCK_FILE}"' EXIT
+
+  log "stale lock detected, removing pid=${old_pid}"
+  rm -f "${LOCK_FILE}"
+fi
+
+echo $$ > "${LOCK_FILE}"
+trap 'rm -f "${LOCK_FILE}"' EXIT
 
   local target source current
   target="$(get_active_network)"
