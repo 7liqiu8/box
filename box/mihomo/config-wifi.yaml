@@ -240,6 +240,7 @@ rule-providers:
 
 rules:
   - IP-CIDR,10.10.10.0/24,回家出口,no-resolve
+  - IP-CIDR,10.11.0.0/16,流量直连,no-resolve
   - IP-CIDR,127.0.0.0/8,流量直连,no-resolve
   - IP-CIDR,192.168.0.0/16,流量直连,no-resolve
   - IP-CIDR,172.16.0.0/12,流量直连,no-resolve
