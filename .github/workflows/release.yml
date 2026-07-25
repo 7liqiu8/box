@@ -2,6 +2,9 @@ name: release
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: 0 3 * * *
+    
     inputs:
       tag:
         description: '正式版本号'
