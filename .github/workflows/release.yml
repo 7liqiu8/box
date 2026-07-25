@@ -2,7 +2,7 @@ name: release
 
 on:
   schedule:
-    - cron: '0 5 * * *'   # 北京时间 13:00
+    - cron: '0 5 * * *'   # 北京时间 13:00 (UTC 5:00)
   workflow_dispatch:
     inputs:
       tag:
@@ -35,17 +35,32 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. Generate version date
+      # 2. 设置触发方式相关的变量（手动/定时）
+      - name: Set trigger variables
+        id: trigger
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "is_auto=true" >> $GITHUB_OUTPUT
+            # 定时触发时使用固定标签，这里设为 nightly，你可以改成其他名字
+            echo "tag=nightly" >> $GITHUB_OUTPUT
+            echo "changelog_input=" >> $GITHUB_OUTPUT
+          else
+            echo "is_auto=false" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            echo "changelog_input=${{ github.event.inputs.changelog }}" >> $GITHUB_OUTPUT
+          fi
+
+      # 3. Generate version date
       - name: Get Version
         id: get_version
         run: echo "date=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      # 3. Generate changelog
+      # 4. Generate changelog
       - name: Generate changelog
         id: changelog
         env:
-          INPUT_CHANGELOG: ${{ github.event.inputs.changelog }}
-          RELEASE_TAG: ${{ github.event.inputs.tag }}
+          INPUT_CHANGELOG: ${{ steps.trigger.outputs.changelog_input }}
+          RELEASE_TAG: ${{ steps.trigger.outputs.tag }}
         run: |
           if [ -n "$(printf "%s" "$INPUT_CHANGELOG" | tr -d '[:space:]')" ]; then
             CHANGELOG_BODY=$(printf "%s\n" "$INPUT_CHANGELOG" | tr '|' '\n' | while IFS= read -r line; do
@@ -77,12 +92,13 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      # 4. Update update.json, module.prop, and CHANGELOG.md
-      - name: Update files
+      # 5. Update files（仅手动触发时执行，自动构建不修改仓库文件）
+      - name: Update files (manual only)
+        if: steps.trigger.outputs.is_auto == 'false'
         env:
           RELEASE_CHANGELOG: ${{ steps.changelog.outputs.body }}
         run: |
-          VERSION="${{ github.event.inputs.tag }}"
+          VERSION="${{ steps.trigger.outputs.tag }}"
           DATE_NUM="${{ steps.get_version.outputs.date }}"
           DATE_HUMAN=$(date +%d-%m-%Y)
           dos2unix module.prop || true
@@ -114,20 +130,21 @@ jobs:
             cat CHANGELOG.md
           } > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
 
-      # 5. Commit and push changes
+      # 6. Commit and push changes (manual only)
       - name: Commit and push changes
+        if: steps.trigger.outputs.is_auto == 'false'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add update.json module.prop CHANGELOG.md
-          git commit -m "${{ github.event.inputs.tag }}" || echo "No changes to commit"
+          git commit -m "${{ steps.trigger.outputs.tag }}" || echo "No changes to commit"
           git push https://github-actions:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:master
 
-      # 6. Get release info
+      # 7. Get release info
       - name: Get Release Info
         id: release_info
         run: |
-          VERSION="${{ github.event.inputs.tag }}"
+          VERSION="${{ steps.trigger.outputs.tag }}"
           COMMIT_HASH=$(git log -1 --pretty=format:"%h")
           COMMIT_DATE=$(git log -1 --pretty=format:"%ad" --date=short)
 
@@ -136,20 +153,31 @@ jobs:
           echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "commit_date=$COMMIT_DATE" >> "$GITHUB_OUTPUT"
 
-      # 7. Run build script
+      # 8. Run build script
       - name: Run build.sh
         run: |
           chmod +x build.sh
           ./build.sh
 
-      # 8. Create GitHub Release
+      # 9. 自动构建时：移动固定标签到当前 commit
+      - name: Move tag (auto only)
+        if: steps.trigger.outputs.is_auto == 'true'
+        uses: richardsimko/update-tag@v1
+        with:
+          tag_name: ${{ steps.trigger.outputs.tag }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 10. Create GitHub Release
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.event.inputs.tag }}
+          tag_name: ${{ steps.trigger.outputs.tag }}
           files: box-*.zip
+          # 自动构建时标记为 prerelease，手动构建为正式 release
+          prerelease: ${{ steps.trigger.outputs.is_auto == 'true' }}
           body: |
-            #### Changelog ${{ github.event.inputs.tag }}
+            #### Changelog ${{ steps.trigger.outputs.tag }}
 
             ${{ steps.changelog.outputs.title }}
 
