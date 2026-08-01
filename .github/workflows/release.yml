@@ -3,15 +3,7 @@ name: release
 on:
   schedule:
     - cron: '0 5 * * *'   # 北京时间 13:00 (UTC 5:00)
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: '正式版本号'
-        required: true
-      changelog:
-        description: '发布更新日志（留空则自动从 commits 生成，手动填写可用 | 分隔）'
-        required: false
-        type: string
+  workflow_dispatch:       # 手动触发，不再需要输入任何参数
 
 jobs:
   build:
@@ -34,18 +26,17 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # 触发方式判断：自动为 prerelease，手动为正式 release
       - name: Set trigger variables
         id: trigger
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
             echo "is_auto=true" >> $GITHUB_OUTPUT
-            echo "tag=nightly" >> $GITHUB_OUTPUT
-            echo "changelog_input=" >> $GITHUB_OUTPUT
           else
             echo "is_auto=false" >> $GITHUB_OUTPUT
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-            echo "changelog_input=${{ github.event.inputs.changelog }}" >> $GITHUB_OUTPUT
           fi
+          # 固定标签，永远用 box-g
+          echo "tag=box-g" >> $GITHUB_OUTPUT
 
       - name: Get Version
         id: get_version
@@ -54,26 +45,16 @@ jobs:
       - name: Generate changelog
         id: changelog
         env:
-          INPUT_CHANGELOG: ${{ steps.trigger.outputs.changelog_input }}
           RELEASE_TAG: ${{ steps.trigger.outputs.tag }}
         run: |
-          if [ -n "$(printf "%s" "$INPUT_CHANGELOG" | tr -d '[:space:]')" ]; then
-            CHANGELOG_BODY=$(printf "%s\n" "$INPUT_CHANGELOG" | tr '|' '\n' | while IFS= read -r line; do
-              trimmed_line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-              if [ -n "$trimmed_line" ]; then
-                echo "- $trimmed_line"
-              fi
-            done)
-            CHANGELOG_TITLE="手动更新日志"
+          # 不再接受手动输入，始终从提交历史自动生成
+          PREVIOUS_TAG=$(git tag -l --sort=-v:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | grep -v -x "$RELEASE_TAG" | head -n 1)
+          if [ -n "$PREVIOUS_TAG" ]; then
+            CHANGELOG_BODY=$(git log "$PREVIOUS_TAG..HEAD" --pretty=format:'- %s (%h)' --no-merges)
+            CHANGELOG_TITLE="自 $PREVIOUS_TAG 以来的变更"
           else
-            PREVIOUS_TAG=$(git tag -l --sort=-v:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | grep -v -x "$RELEASE_TAG" | head -n 1)
-            if [ -n "$PREVIOUS_TAG" ]; then
-              CHANGELOG_BODY=$(git log "$PREVIOUS_TAG..HEAD" --pretty=format:'- %s (%h)' --no-merges)
-              CHANGELOG_TITLE="自 $PREVIOUS_TAG 以来的变更"
-            else
-              CHANGELOG_BODY=$(git log -n 50 --pretty=format:'- %s (%h)' --no-merges)
-              CHANGELOG_TITLE="最近变更"
-            fi
+            CHANGELOG_BODY=$(git log -n 50 --pretty=format:'- %s (%h)' --no-merges)
+            CHANGELOG_TITLE="最近变更"
           fi
 
           if [ -z "$CHANGELOG_BODY" ]; then
@@ -87,6 +68,7 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
+      # 手动触发时才更新仓库内的文件（module.prop、update.json、CHANGELOG.md）
       - name: Update files (manual only)
         if: steps.trigger.outputs.is_auto == 'false'
         env:
@@ -147,8 +129,8 @@ jobs:
           chmod +x build.sh
           ./build.sh
 
-      - name: Move tag (auto only)
-        if: steps.trigger.outputs.is_auto == 'true'
+      # 无论自动还是手动，始终将 box-g 标签移动到最新 commit
+      - name: Move tag to current commit
         uses: richardsimko/update-tag@v1
         with:
           tag_name: ${{ steps.trigger.outputs.tag }}
