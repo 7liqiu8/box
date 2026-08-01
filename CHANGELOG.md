@@ -1,3 +1,22 @@
+#### Changelog 1.28-g - 01-08-2026
+- Delete .github/workflows/debug.yml (3b26b08)
+- Update release.yml (dc5223c)
+- Update release.yml (13b336d)
+- Update release.yml (55818d9)
+- Update release.yml (861fc4b)
+- Create Delete-Old-Workflows.yml (5030d36)
+- Update config-cellular.yaml (c3df61c)
+- Update config-wifi.yaml (28b5dbd)
+- Update switch_mihomo_profile.sh (ab15f77)
+- Fix typo in config-wifi.yaml filename (816ce29)
+- 1.2.8-g (e9f05d7)
+- Create config-wifi.ymal (ab06395)
+- Add config-cellular.yaml with initial settings (68a3ece)
+- Update README.md (e65e2e8)
+- Update customize.sh (6cc5552)
+- Create switch_mihomo_profile.sh (6467fed)
+- Update net.inotify (c9a1bb4)
+
 #### Changelog 1.2.8-g - 10-07-2026
 - Create config-wifi.ymal (ab06395)
 - Add config-cellular.yaml with initial settings (68a3ece)
